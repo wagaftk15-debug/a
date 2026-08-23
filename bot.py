@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+import psycopg2
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
@@ -8,23 +9,85 @@ app = Flask(__name__)
 # التوكن يُقرأ من متغير بيئة اسمه BOT_TOKEN (تُضاف من لوحة Railway → Variables)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-DATA_FILE = os.path.join(os.path.dirname(__file__), "data.json")
+
+# رابط قاعدة البيانات (يُضاف من لوحة Railway → Variables باسم DATABASE_URL)
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 
-# ───────────────────────── تخزين البيانات ─────────────────────────
-def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"count": 0, "user_ids": []}
+# ───────────────────────── تخزين البيانات (PostgreSQL) ─────────────────────────
+def get_connection():
+    return psycopg2.connect(DATABASE_URL)
 
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
+def init_db():
+    """ينشئ الجدول المطلوب إذا لم يكن موجوداً، يُنفَّذ مرة عند بدء التطبيق."""
+    if not DATABASE_URL:
+        print("DATABASE_URL غير موجود، لن يتم الاتصال بقاعدة البيانات.")
+        return
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS registrations (
+                user_id BIGINT PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("تم تجهيز قاعدة البيانات بنجاح.")
+    except Exception as e:
+        print(f"فشل تجهيز قاعدة البيانات: {e}")
+
+
+def get_count():
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM registrations")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return count
+    except Exception as e:
+        print(f"get_count error: {e}")
+        return 0
+
+
+def is_registered(user_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM registrations WHERE user_id = %s", (user_id,))
+        exists = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return exists
+    except Exception as e:
+        print(f"is_registered error: {e}")
+        return False
+
+
+def register_user(user_id):
+    """يسجل المستخدم ويرجع True لو نجح، False لو كان مسجل مسبقاً."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO registrations (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (user_id,),
+        )
+        added = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        conn.close()
+        return added
+    except Exception as e:
+        print(f"register_user error: {e}")
+        return False
 
 
 # ───────────────────────── دوال تيليجرام ─────────────────────────
@@ -57,6 +120,7 @@ HTML_PAGE = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>بوت زوجوني 💍</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -107,12 +171,19 @@ HTML_PAGE = """
     <div class="subtitle">إحصائية حيّة من بوت التلقرام</div>
     <div class="count" id="count">{{ count }}</div>
     <p class="desc">شخص سجّل رغبته بالزواج حتى الآن</p>
-    <a class="btn" href="https://t.me/zawjoni" target="_blank" rel="noopener">
+    <a class="btn" href="https://t.me/YOUR_BOT_USERNAME" target="_blank" rel="noopener">
       سجّل نفسك عبر البوت
     </a>
   </div>
 
   <script>
+    // تفعيل وضع Mini App داخل تيليجرام (توسعة كاملة للشاشة)
+    if (window.Telegram && window.Telegram.WebApp) {
+      const tg = window.Telegram.WebApp;
+      tg.ready();
+      tg.expand();
+    }
+
     async function refreshCount() {
       try {
         const res = await fetch('/api/count');
@@ -136,14 +207,13 @@ HTML_PAGE = """
 
 @app.route("/")
 def home():
-    data = load_data()
-    return render_template_string(HTML_PAGE, count=data["count"])
+    count = get_count()
+    return render_template_string(HTML_PAGE, count=count)
 
 
 @app.route("/api/count")
 def api_count():
-    data = load_data()
-    return jsonify({"count": data["count"]})
+    return jsonify({"count": get_count()})
 
 
 # ───────────────────────── الويب هوك (استقبال رسائل البوت) ─────────────────────────
@@ -173,8 +243,7 @@ def webhook():
             )
 
         elif text in ("/عدد", "/count"):
-            data = load_data()
-            send_message(chat_id, f"عدد الأشخاص المسجلين لحد الآن: {data['count']} 💍")
+            send_message(chat_id, f"عدد الأشخاص المسجلين لحد الآن: {get_count()} 💍")
 
     # ضغطة على الزر (Callback Query)
     elif "callback_query" in update:
@@ -185,18 +254,18 @@ def webhook():
         data_key = cq.get("data")
 
         if data_key == "want_marry":
-            data = load_data()
-            if user_id in data["user_ids"]:
+            if is_registered(user_id):
                 answer_callback(callback_id, "أنت مسجل مسبقاً 😄")
             else:
-                data["user_ids"].append(user_id)
-                data["count"] += 1
-                save_data(data)
-                answer_callback(callback_id, "تم تسجيلك! مبروك مقدماً 🎉")
-                send_message(
-                    chat_id,
-                    f"تم تسجيلك بنجاح ✅\nعدد الراغبين بالزواج لحد الآن: {data['count']} 💍",
-                )
+                added = register_user(user_id)
+                if added:
+                    answer_callback(callback_id, "تم تسجيلك! مبروك مقدماً 🎉")
+                    send_message(
+                        chat_id,
+                        f"تم تسجيلك بنجاح ✅\nعدد الراغبين بالزواج لحد الآن: {get_count()} 💍",
+                    )
+                else:
+                    answer_callback(callback_id, "حصل خطأ، جرب مرة ثانية 🙏")
 
     return jsonify({"ok": True})
 
@@ -216,6 +285,7 @@ def set_webhook():
 
 
 # يُنفَّذ عند استيراد الملف (يعمل مع gunicorn والتشغيل المباشر على حد سواء)
+init_db()
 set_webhook()
 
 
