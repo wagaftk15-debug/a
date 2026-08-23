@@ -13,6 +13,9 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # رابط قاعدة البيانات (يُضاف من لوحة Railway → Variables باسم DATABASE_URL)
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# قيم الدعم المتاحة بنجوم تيليجرام
+DONATION_AMOUNTS = [100, 200, 500, 1000]
+
 
 # ───────────────────────── تخزين البيانات (PostgreSQL) ─────────────────────────
 def get_connection():
@@ -20,7 +23,7 @@ def get_connection():
 
 
 def init_db():
-    """ينشئ الجدول المطلوب إذا لم يكن موجوداً، يُنفَّذ مرة عند بدء التطبيق."""
+    """ينشئ الجداول المطلوبة إذا لم تكن موجودة، يُنفَّذ مرة عند بدء التطبيق."""
     if not DATABASE_URL:
         print("DATABASE_URL غير موجود، لن يتم الاتصال بقاعدة البيانات.")
         return
@@ -31,6 +34,17 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS registrations (
                 user_id BIGINT PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS donations (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount INTEGER NOT NULL,
+                telegram_payment_charge_id TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             )
             """
@@ -90,6 +104,42 @@ def register_user(user_id):
         return False
 
 
+def record_donation(user_id, amount, charge_id):
+    """يسجل عملية دعم ناجحة في جدول donations."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO donations (user_id, amount, telegram_payment_charge_id)
+            VALUES (%s, %s, %s)
+            """,
+            (user_id, amount, charge_id),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"record_donation error: {e}")
+        return False
+
+
+def get_donations_stats():
+    """يرجع (عدد عمليات الدعم، مجموع النجوم) من جدول donations."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM donations")
+        count, total = cur.fetchone()
+        cur.close()
+        conn.close()
+        return count, total
+    except Exception as e:
+        print(f"get_donations_stats error: {e}")
+        return 0, 0
+
+
 # ───────────────────────── دوال تيليجرام ─────────────────────────
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -110,6 +160,44 @@ def answer_callback(callback_id, text):
         )
     except Exception as e:
         print(f"answer_callback error: {e}")
+
+
+def send_invoice(chat_id, amount):
+    """يرسل فاتورة دفع بنجوم تيليجرام (XTR). provider_token يجب أن يكون فارغاً للنجوم."""
+    payload = {
+        "chat_id": chat_id,
+        "title": "دعم بوت زوجوني 💍",
+        "description": f"دعمك بقيمة {amount} نجمة تيليجرام بيساعدنا نكمل ونطوّر البوت 🙏",
+        "payload": f"donate_{amount}_{chat_id}",
+        "provider_token": "",  # فارغ إلزامياً عند استخدام عملة النجوم XTR
+        "currency": "XTR",
+        "prices": [{"label": f"دعم {amount} نجمة", "amount": amount}],
+    }
+    try:
+        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=10)
+        print(f"send_invoice({amount}) -> {r.json()}")
+    except Exception as e:
+        print(f"send_invoice error: {e}")
+
+
+def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
+    """يجب الرد على pre_checkout_query خلال 10 ثواني وإلا يُرفض الدفع تلقائياً."""
+    payload = {"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}
+    if error_message:
+        payload["error_message"] = error_message
+    try:
+        requests.post(f"{TELEGRAM_API}/answerPreCheckoutQuery", json=payload, timeout=10)
+    except Exception as e:
+        print(f"answer_pre_checkout error: {e}")
+
+
+def donation_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": f"⭐ دعم بـ {amount} نجمة", "callback_data": f"donate_{amount}"}]
+            for amount in DONATION_AMOUNTS
+        ]
+    }
 
 
 # ───────────────────────── صفحة الويب (HTML مدمج بالكود مباشرة) ─────────────────────────
@@ -216,16 +304,42 @@ def api_count():
     return jsonify({"count": get_count()})
 
 
+@app.route("/api/donations")
+def api_donations():
+    count, total = get_donations_stats()
+    return jsonify({"donations_count": count, "stars_total": total})
+
+
 # ───────────────────────── الويب هوك (استقبال رسائل البوت) ─────────────────────────
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = request.get_json(force=True, silent=True) or {}
 
-    # رسالة نصية عادية (مثل /start)
+    # طلب تأكيد ما قبل الدفع - إلزامي الرد عليه خلال 10 ثواني
+    if "pre_checkout_query" in update:
+        pcq = update["pre_checkout_query"]
+        # هون ممكن تضيف تحقق إضافي إذا حبيت (مثلاً التأكد إن المبلغ ضمن القيم المسموحة)
+        answer_pre_checkout(pcq["id"], ok=True)
+        return jsonify({"ok": True})
+
+    # رسالة نصية عادية (مثل /start) أو إشعار دفع ناجح
     if "message" in update:
         msg = update["message"]
         chat_id = msg["chat"]["id"]
         text = msg.get("text", "")
+
+        # دفعة ناجحة بنجوم تيليجرام
+        if "successful_payment" in msg:
+            sp = msg["successful_payment"]
+            amount = sp.get("total_amount", 0)  # بعملة XTR القيمة = عدد النجوم مباشرة
+            charge_id = sp.get("telegram_payment_charge_id")
+            user_id = msg["from"]["id"]
+            record_donation(user_id, amount, charge_id)
+            send_message(
+                chat_id,
+                f"شكراً إلك من قلبنا 🙏💛\nتم استلام دعمك بقيمة {amount} نجمة ⭐️\nالله يجزيك الخير!",
+            )
+            return jsonify({"ok": True})
 
         if text == "/start":
             site_url = f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')}"
@@ -233,6 +347,7 @@ def webhook():
                 "inline_keyboard": [
                     [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
                     [{"text": "🌐 ادخل", "web_app": {"url": site_url}}],
+                    [{"text": "⭐ ادعم البوت", "callback_data": "show_donate"}],
                 ]
             }
             send_message(
@@ -245,13 +360,27 @@ def webhook():
         elif text in ("/عدد", "/count"):
             send_message(chat_id, f"عدد الأشخاص المسجلين لحد الآن: {get_count()} 💍")
 
+        elif text in ("/دعم", "/support", "/donate"):
+            send_message(
+                chat_id,
+                "بتقدر تدعم البوت بنجوم تيليجرام ⭐ اختر القيمة اللي بتناسبك:",
+                donation_keyboard(),
+            )
+
+        elif text in ("/احصائية_الدعم", "/donations"):
+            count, total = get_donations_stats()
+            send_message(
+                chat_id,
+                f"عدد عمليات الدعم: {count}\nإجمالي النجوم المستلمة: {total} ⭐️",
+            )
+
     # ضغطة على الزر (Callback Query)
     elif "callback_query" in update:
         cq = update["callback_query"]
         user_id = cq["from"]["id"]
         chat_id = cq["message"]["chat"]["id"]
         callback_id = cq["id"]
-        data_key = cq.get("data")
+        data_key = cq.get("data", "")
 
         if data_key == "want_marry":
             if is_registered(user_id):
@@ -267,6 +396,25 @@ def webhook():
                 else:
                     answer_callback(callback_id, "حصل خطأ، جرب مرة ثانية 🙏")
 
+        elif data_key == "show_donate":
+            answer_callback(callback_id, "")
+            send_message(
+                chat_id,
+                "بتقدر تدعم البوت بنجوم تيليجرام ⭐ اختر القيمة اللي بتناسبك:",
+                donation_keyboard(),
+            )
+
+        elif data_key.startswith("donate_"):
+            try:
+                amount = int(data_key.split("_")[1])
+            except (IndexError, ValueError):
+                amount = 0
+            if amount in DONATION_AMOUNTS:
+                answer_callback(callback_id, f"جاري تجهيز فاتورة {amount} نجمة ⭐")
+                send_invoice(chat_id, amount)
+            else:
+                answer_callback(callback_id, "قيمة غير صالحة 🙏")
+
     return jsonify({"ok": True})
 
 
@@ -278,7 +426,17 @@ def set_webhook():
         return
     url = f"https://{domain}/webhook/{BOT_TOKEN}"
     try:
-        r = requests.get(f"{TELEGRAM_API}/setWebhook", params={"url": url}, timeout=10)
+        # allowed_updates لازم تتضمن pre_checkout_query عشان تيليجرام يرسلها للويب هوك
+        r = requests.get(
+            f"{TELEGRAM_API}/setWebhook",
+            params={
+                "url": url,
+                "allowed_updates": json.dumps(
+                    ["message", "callback_query", "pre_checkout_query"]
+                ),
+            },
+            timeout=10,
+        )
         print(f"Webhook set to: {url} -> {r.json()}")
     except Exception as e:
         print(f"فشل ضبط الويب هوك: {e}")
