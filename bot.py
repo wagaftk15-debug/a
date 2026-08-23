@@ -158,9 +158,11 @@ def webhook():
         text = msg.get("text", "")
 
         if text == "/start":
+            site_url = f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')}"
             keyboard = {
                 "inline_keyboard": [
-                    [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}]
+                    [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
+                    [{"text": "🌐 شوف الموقع", "url": site_url}],
                 ]
             }
             send_message(
