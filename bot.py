@@ -22,6 +22,9 @@ DONATION_AMOUNTS = [100, 200, 500, 1000]
 # سعر اقتراح فكرة/ميزة جديدة بنجوم تيليجرام
 SUGGESTION_PRICE = 100
 
+# عدد نقاط المكافأة اليومية
+DAILY_POINTS = 100
+
 
 # ───────────────────────── تخزين البيانات (PostgreSQL) ─────────────────────────
 def get_connection():
@@ -90,6 +93,17 @@ def init_db():
                 action TEXT NOT NULL,
                 charge_id TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+
+        # نقاط المستخدمين (مكافأة يومية بالضغط على زر مخصص)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_points (
+                user_id BIGINT PRIMARY KEY,
+                total_points INTEGER NOT NULL DEFAULT 0,
+                last_claim_date DATE
             )
             """
         )
@@ -343,6 +357,106 @@ def get_suggestions_count():
         return 0
 
 
+# ───────────────────────── إلغاء الاشتراك (الانسحاب) ─────────────────────────
+def unregister_user(user_id):
+    """يحذف المستخدم من جدول registrations. يرجع True لو كان مسجل وانحذف فعلاً."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM registrations WHERE user_id = %s", (user_id,))
+        removed = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        conn.close()
+        return removed
+    except Exception as e:
+        print(f"unregister_user error: {e}")
+        return False
+
+
+# ───────────────────────── نظام النقاط اليومية ─────────────────────────
+def claim_daily_points(user_id):
+    """
+    يحاول منح المستخدم DAILY_POINTS نقطة لهاليوم.
+    يرجع (True, المجموع_الجديد) لو نجحت العملية (أول مرة اليوم).
+    يرجع (False, المجموع_الحالي) لو كان خد نقاطه اليوم مسبقاً.
+    """
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO user_points (user_id, total_points, last_claim_date)
+            VALUES (%s, %s, CURRENT_DATE)
+            ON CONFLICT (user_id) DO UPDATE
+            SET total_points = user_points.total_points + %s,
+                last_claim_date = CURRENT_DATE
+            WHERE user_points.last_claim_date IS DISTINCT FROM CURRENT_DATE
+            RETURNING total_points
+            """,
+            (user_id, DAILY_POINTS, DAILY_POINTS),
+        )
+        row = cur.fetchone()
+        if row:
+            conn.commit()
+            cur.close()
+            conn.close()
+            return True, row[0]
+
+        # ما انحدث أي شيء يعني خد نقاطه اليوم مسبقاً، منجيب مجموعه الحالي
+        cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
+        existing = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return False, (existing[0] if existing else 0)
+    except Exception as e:
+        print(f"claim_daily_points error: {e}")
+        return False, 0
+
+
+def get_user_points(user_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row[0] if row else 0
+    except Exception as e:
+        print(f"get_user_points error: {e}")
+        return 0
+
+
+def get_leaderboard(limit=10):
+    """يرجع أعلى المستخدمين نقاطاً (اسم + مجموع نقاط)."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                p.user_id,
+                COALESCE(NULLIF(u.username, ''), NULLIF(u.first_name, ''), 'مستخدم') AS display_name,
+                p.total_points
+            FROM user_points p
+            LEFT JOIN users u ON u.user_id = p.user_id
+            WHERE p.total_points > 0
+            ORDER BY p.total_points DESC, p.user_id ASC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [{"user_id": r[0], "name": r[1], "points": r[2]} for r in rows]
+    except Exception as e:
+        print(f"get_leaderboard error: {e}")
+        return []
+
+
 # ───────────────────────── دوال تيليجرام ─────────────────────────
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -354,11 +468,11 @@ def send_message(chat_id, text, reply_markup=None):
         print(f"send_message error: {e}")
 
 
-def answer_callback(callback_id, text):
+def answer_callback(callback_id, text, show_alert=False):
     try:
         requests.post(
             f"{TELEGRAM_API}/answerCallbackQuery",
-            json={"callback_query_id": callback_id, "text": text, "show_alert": False},
+            json={"callback_query_id": callback_id, "text": text, "show_alert": show_alert},
             timeout=10,
         )
     except Exception as e:
@@ -424,6 +538,27 @@ def donation_keyboard():
         for amount in DONATION_AMOUNTS
     ]
     return {"inline_keyboard": keyboard}
+
+
+def unsubscribe_confirm_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ نعم، بدي انسحب", "callback_data": "confirm_unsubscribe"}],
+            [{"text": "🙅 لأ، تراجعت", "callback_data": "cancel_unsubscribe"}],
+        ]
+    }
+
+
+def build_leaderboard_text():
+    top = get_leaderboard(10)
+    if not top:
+        return "لسا محدا كسب نقاط 🙂 كون أول واحد يجمع نقاط اليوم!"
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 لائحة الصدارة بالنقاط:\n"]
+    for i, u in enumerate(top):
+        rank_icon = medals[i] if i < len(medals) else f"{i + 1}."
+        lines.append(f"{rank_icon} {mask_name(u['name'])} — {u['points']} نقطة")
+    return "\n".join(lines)
 
 
 def notify_admin_new_suggestion(user_id, username, content):
@@ -863,8 +998,13 @@ def webhook():
                     "inline_keyboard": [
                         [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
                         [{"text": "🌐 ادخل", "web_app": {"url": site_url}}],
+                        [
+                            {"text": "🎁 نقاط اليوم", "callback_data": "claim_points"},
+                            {"text": "🏆 الصدارة", "callback_data": "show_leaderboard"},
+                        ],
                         [{"text": "⭐ ادعم البوت", "callback_data": "show_donate"}],
                         [{"text": "💡 اقترح إضافة", "callback_data": "propose_idea"}],
+                        [{"text": "❌ إلغاء الاشتراك", "callback_data": "unsubscribe"}],
                     ]
                 }
                 send_message(
@@ -896,6 +1036,22 @@ def webhook():
 
         elif text in ("/الاقتراحات", "/suggestions") and str(chat_id) == str(ADMIN_CHAT_ID):
             send_message(chat_id, f"عدد الاقتراحات المستلمة: {get_suggestions_count()} 💡")
+
+        elif text in ("/نقاطي", "/points"):
+            send_message(chat_id, f"مجموع نقاطك: {get_user_points(user_id)} ⭐")
+
+        elif text in ("/الصدارة", "/leaderboard"):
+            send_message(chat_id, build_leaderboard_text())
+
+        elif text in ("/انسحب", "/unsubscribe"):
+            if is_registered(user_id):
+                send_message(
+                    chat_id,
+                    "متأكد بدك تنسحب من قائمة المسجلين للزواج؟",
+                    unsubscribe_confirm_keyboard(),
+                )
+            else:
+                send_message(chat_id, "أنت مش مسجل أصلاً بالقائمة 🙂")
 
     # ضغطة على الزر (Callback Query)
     elif "callback_query" in update:
@@ -944,6 +1100,50 @@ def webhook():
         elif data_key == "propose_idea":
             answer_callback(callback_id, f"جاري تجهيز فاتورة {SUGGESTION_PRICE} نجمة ⭐")
             send_suggestion_invoice(chat_id)
+
+        elif data_key == "claim_points":
+            success, total = claim_daily_points(user_id)
+            if success:
+                answer_callback(callback_id, f"🎁 +{DAILY_POINTS} نقطة!")
+                send_message(
+                    chat_id,
+                    f"أخدت {DAILY_POINTS} نقطة اليوم 🎁\nمجموع نقاطك الآن: {total} ⭐\nرجعلنا بكرا تاخد نقاط كمان!",
+                )
+            else:
+                answer_callback(
+                    callback_id,
+                    "أخدت نقاط اليوم مسبقاً، رجعلنا بكرا 🙏",
+                    show_alert=True,
+                )
+
+        elif data_key == "show_leaderboard":
+            answer_callback(callback_id, "")
+            send_message(chat_id, build_leaderboard_text())
+
+        elif data_key == "unsubscribe":
+            answer_callback(callback_id, "")
+            if is_registered(user_id):
+                send_message(
+                    chat_id,
+                    "متأكد بدك تنسحب من قائمة المسجلين للزواج؟",
+                    unsubscribe_confirm_keyboard(),
+                )
+            else:
+                send_message(chat_id, "أنت مش مسجل أصلاً بالقائمة 🙂")
+
+        elif data_key == "confirm_unsubscribe":
+            removed = unregister_user(user_id)
+            if removed:
+                answer_callback(callback_id, "تم الانسحاب ✅")
+                send_message(
+                    chat_id,
+                    f"تم حذفك من قائمة المسجلين 👋\nعدد الراغبين بالزواج الآن: {get_count()} 💍",
+                )
+            else:
+                answer_callback(callback_id, "ما كنت مسجل أصلاً 🙂")
+
+        elif data_key == "cancel_unsubscribe":
+            answer_callback(callback_id, "تم التراجع 👍")
 
     return jsonify({"ok": True})
 
