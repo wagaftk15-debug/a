@@ -1,11 +1,11 @@
 import os
 import json
 import requests
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
-# التوكن يُقرأ من متغير بيئة اسمه BOT_TOKEN (تضيفه من لوحة Railway)
+# التوكن يُقرأ من متغير بيئة اسمه BOT_TOKEN (تُضاف من لوحة Railway → Variables)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATA_FILE = os.path.join(os.path.dirname(__file__), "data.json")
@@ -49,11 +49,95 @@ def answer_callback(callback_id, text):
         print(f"answer_callback error: {e}")
 
 
-# ───────────────────────── صفحة الويب ─────────────────────────
+# ───────────────────────── صفحة الويب (HTML مدمج بالكود مباشرة) ─────────────────────────
+HTML_PAGE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>بوت زوجوني 💍</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+    color: #f1f5f9;
+  }
+  .card {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid #2e3a55;
+    border-radius: 24px;
+    padding: 40px 50px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    max-width: 90vw;
+  }
+  h1 { font-size: 26px; margin: 0 0 6px 0; }
+  .subtitle { color: #8a9bb8; font-size: 13px; margin-bottom: 20px; }
+  .count {
+    font-size: 64px;
+    font-weight: bold;
+    color: #c8a96e;
+    margin: 10px 0;
+    transition: transform 0.2s ease;
+  }
+  p.desc { color: #8a9bb8; font-size: 14px; margin: 0 0 20px 0; }
+  a.btn {
+    display: inline-block;
+    padding: 12px 28px;
+    background: #c8a96e;
+    color: #1a1a2e;
+    text-decoration: none;
+    border-radius: 50px;
+    font-weight: bold;
+    transition: opacity 0.2s ease;
+  }
+  a.btn:hover { opacity: 0.85; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>بوت زوجوني 💍</h1>
+    <div class="subtitle">إحصائية حيّة من بوت التلقرام</div>
+    <div class="count" id="count">{{ count }}</div>
+    <p class="desc">شخص سجّل رغبته بالزواج حتى الآن</p>
+    <a class="btn" href="https://t.me/YOUR_BOT_USERNAME" target="_blank" rel="noopener">
+      سجّل نفسك عبر البوت
+    </a>
+  </div>
+
+  <script>
+    async function refreshCount() {
+      try {
+        const res = await fetch('/api/count');
+        const data = await res.json();
+        const el = document.getElementById('count');
+        if (el.textContent != data.count) {
+          el.textContent = data.count;
+          el.style.transform = 'scale(1.15)';
+          setTimeout(() => { el.style.transform = 'scale(1)'; }, 200);
+        }
+      } catch (e) {
+        console.error('تعذر تحديث العدد', e);
+      }
+    }
+    setInterval(refreshCount, 5000);
+  </script>
+</body>
+</html>
+"""
+
+
 @app.route("/")
 def home():
     data = load_data()
-    return render_template("index.html", count=data["count"])
+    return render_template_string(HTML_PAGE, count=data["count"])
 
 
 @app.route("/api/count")
