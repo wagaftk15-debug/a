@@ -549,24 +549,9 @@ MINI_APP_PAGE = """
     color: var(--muted);
     font-size: 14px;
     line-height: 1.7;
-    margin: 16px 0 30px;
+    margin: 16px 0 0;
     max-width: 270px;
   }
-  .cta {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 16px 36px;
-    background: linear-gradient(135deg, var(--blush), var(--blush-deep));
-    color: #1c1428;
-    text-decoration: none;
-    border-radius: 50px;
-    font-weight: 700;
-    font-size: 15px;
-    box-shadow: 0 14px 32px rgba(224, 160, 143, 0.22);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-  }
-  .cta:active { transform: scale(0.96); box-shadow: 0 6px 16px rgba(224, 160, 143, 0.18); }
 
   /* --- صفحة الداعمين --- */
   #view-donations { padding-top: 16px; }
@@ -622,30 +607,6 @@ MINI_APP_PAGE = """
     font-size: 13.5px;
     padding: 44px 10px;
   }
-
-  /* ───── زر "اقترح إضافة" العائم ───── */
-  .fab {
-    position: absolute;
-    z-index: 2;
-    left: 18px;
-    bottom: 18px;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 12px 18px;
-    background: rgba(20, 14, 33, 0.92);
-    border: 1px solid rgba(226, 163, 143, 0.45);
-    color: var(--blush);
-    text-decoration: none;
-    border-radius: 50px;
-    font-size: 12.5px;
-    font-weight: 700;
-    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
-    backdrop-filter: blur(8px);
-    transition: transform 0.15s ease;
-  }
-  .fab:active { transform: scale(0.95); }
-  .fab svg { width: 16px; height: 16px; flex-shrink: 0; }
 
   /* ───── قسم الأزرار السفلي (التنقّل) ───── */
   .tabbar {
@@ -706,9 +667,6 @@ MINI_APP_PAGE = """
       <div class="hero-label">شخص سجّل رغبته بالزواج حتى الآن</div>
       <div class="count" id="count">{{ count }}</div>
       <div class="count-desc">القائمة بتزيد كل يوم، سجّل حالك وخلّي حظك يشتغل 😄</div>
-      <a class="cta" href="https://t.me/zawjoni" target="_blank" rel="noopener">
-        سجّل نفسك عبر البوت
-      </a>
     </main>
 
     <main id="view-donations" class="view">
@@ -722,14 +680,6 @@ MINI_APP_PAGE = """
       </div>
     </main>
 
-    <a class="fab" href="https://t.me/zawjoni?start=suggest" target="_blank" rel="noopener">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-        <path d="M9 18h6"/><path d="M10 22h4"/>
-        <path d="M12 2a6 6 0 0 0-4 10.5c.6.5 1 1.3 1 2.1V16h6v-1.4c0-.8.4-1.6 1-2.1A6 6 0 0 0 12 2z"/>
-      </svg>
-      اقترح إضافة · {{ suggestion_price }} ⭐
-    </a>
-
     <nav class="tabbar">
       <button class="tab active" data-view="home">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -739,9 +689,9 @@ MINI_APP_PAGE = """
       </button>
       <button class="tab" data-view="donations">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-          <path d="M12 3.5 14.2 9l6 .6-4.5 3.9 1.4 5.9L12 16.3 6.9 19.4l1.4-5.9L3.8 9.6l6-.6z"/>
+          <circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-3.6 3-6.2 7-6.2s7 2.6 7 6.2"/>
         </svg>
-        الداعمون
+        المستخدمون
       </button>
     </nav>
   </div>
