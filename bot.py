@@ -30,6 +30,19 @@ def init_db():
     try:
         conn = get_connection()
         cur = conn.cursor()
+
+        # جدول عام لكل مستخدم تفاعل مع البوت (يخزن آخر اسم/يوزر معروف له)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS registrations (
@@ -55,6 +68,29 @@ def init_db():
         print("تم تجهيز قاعدة البيانات بنجاح.")
     except Exception as e:
         print(f"فشل تجهيز قاعدة البيانات: {e}")
+
+
+def upsert_user(user_id, username=None, first_name=None):
+    """يحفظ/يحدّث آخر اسم مستخدم معروف لكل شخص تفاعل مع البوت."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO users (user_id, username, first_name, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+            SET username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                updated_at = NOW()
+            """,
+            (user_id, username, first_name),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"upsert_user error: {e}")
 
 
 def get_count():
@@ -140,6 +176,53 @@ def get_donations_stats():
         return 0, 0
 
 
+def get_registered_users_with_donations():
+    """
+    يرجع قائمة المسجلين (طلب الزواج) مع اسم كل واحد (من جدول users)
+    ومجموع ما تبرّع به من نجوم، مرتبة حسب تاريخ التسجيل.
+    """
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                r.user_id,
+                COALESCE(NULLIF(u.username, ''), NULLIF(u.first_name, ''), 'مستخدم') AS display_name,
+                COALESCE(SUM(d.amount), 0) AS total_donated,
+                r.created_at
+            FROM registrations r
+            LEFT JOIN users u ON u.user_id = r.user_id
+            LEFT JOIN donations d ON d.user_id = r.user_id
+            GROUP BY r.user_id, u.username, u.first_name, r.created_at
+            ORDER BY r.created_at ASC
+            """
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [
+            {"user_id": row[0], "name": row[1], "donated": int(row[2])}
+            for row in rows
+        ]
+    except Exception as e:
+        print(f"get_registered_users_with_donations error: {e}")
+        return []
+
+
+def mask_name(name):
+    """
+    يعتم كل حروف الاسم ما عدا الحرف الأول (يبقى ظاهر بدون تعتيم).
+    مثال: "أحمد" -> "أ***"
+    """
+    if not name:
+        return "*"
+    name = str(name).strip()
+    if len(name) <= 1:
+        return name
+    return name[0] + "*" * (len(name) - 1)
+
+
 # ───────────────────────── دوال تيليجرام ─────────────────────────
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -200,7 +283,7 @@ def donation_keyboard():
     }
 
 
-# ───────────────────────── صفحة الويب (HTML مدمج بالكود مباشرة) ─────────────────────────
+# ───────────────────────── صفحة الويب الرئيسية ─────────────────────────
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -249,6 +332,12 @@ HTML_PAGE = """
     border-radius: 50px;
     font-weight: bold;
     transition: opacity 0.2s ease;
+    margin: 6px;
+  }
+  a.btn.secondary {
+    background: transparent;
+    border: 1px solid #c8a96e;
+    color: #c8a96e;
   }
   a.btn:hover { opacity: 0.85; }
 </style>
@@ -262,10 +351,12 @@ HTML_PAGE = """
     <a class="btn" href="https://t.me/zawjoni" target="_blank" rel="noopener">
       سجّل نفسك عبر البوت
     </a>
+    <a class="btn secondary" href="/users">
+      قائمة المسجلين
+    </a>
   </div>
 
   <script>
-    // تفعيل وضع Mini App داخل تيليجرام (توسعة كاملة للشاشة)
     if (window.Telegram && window.Telegram.WebApp) {
       const tg = window.Telegram.WebApp;
       tg.ready();
@@ -293,10 +384,104 @@ HTML_PAGE = """
 """
 
 
+# ───────────────────────── صفحة قائمة المسجلين + التبرعات ─────────────────────────
+USERS_PAGE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>قائمة المسجلين - بوت زوجوني 💍</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+    color: #f1f5f9;
+    padding: 24px 12px;
+  }
+  .wrap { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 22px; text-align: center; margin-bottom: 4px; }
+  .subtitle { color: #8a9bb8; font-size: 13px; text-align: center; margin-bottom: 20px; }
+  .list {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid #2e3a55;
+    border-radius: 16px;
+    overflow: hidden;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid #2e3a55;
+  }
+  .row:last-child { border-bottom: none; }
+  .name { font-size: 15px; letter-spacing: 1px; }
+  .donated {
+    font-size: 14px;
+    color: #c8a96e;
+    font-weight: bold;
+    white-space: nowrap;
+  }
+  .donated.zero { color: #5a6a88; font-weight: normal; }
+  .empty { text-align: center; color: #8a9bb8; padding: 30px 10px; }
+  a.back {
+    display: block;
+    text-align: center;
+    color: #c8a96e;
+    text-decoration: none;
+    margin-top: 20px;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>قائمة المسجلين 💍</h1>
+    <div class="subtitle">{{ users|length }} شخص مسجّل</div>
+    <div class="list">
+      {% for u in users %}
+      <div class="row">
+        <span class="name">{{ u.masked_name }}</span>
+        <span class="donated {{ 'zero' if u.donated == 0 else '' }}">
+          {{ u.donated }} ⭐
+        </span>
+      </div>
+      {% else %}
+      <div class="empty">ما في حدا مسجل لسا 🙂</div>
+      {% endfor %}
+    </div>
+    <a class="back" href="/">⬅ رجوع للصفحة الرئيسية</a>
+  </div>
+
+  <script>
+    if (window.Telegram && window.Telegram.WebApp) {
+      const tg = window.Telegram.WebApp;
+      tg.ready();
+      tg.expand();
+    }
+  </script>
+</body>
+</html>
+"""
+
+
 @app.route("/")
 def home():
     count = get_count()
     return render_template_string(HTML_PAGE, count=count)
+
+
+@app.route("/users")
+def users_page():
+    users = get_registered_users_with_donations()
+    for u in users:
+        u["masked_name"] = mask_name(u["name"])
+    return render_template_string(USERS_PAGE, users=users)
 
 
 @app.route("/api/count")
@@ -310,6 +495,17 @@ def api_donations():
     return jsonify({"donations_count": count, "stars_total": total})
 
 
+@app.route("/api/users")
+def api_users():
+    """نفس بيانات صفحة /users لكن بصيغة JSON (الاسم معتّم أيضاً)."""
+    users = get_registered_users_with_donations()
+    result = [
+        {"masked_name": mask_name(u["name"]), "donated": u["donated"]}
+        for u in users
+    ]
+    return jsonify({"users": result})
+
+
 # ───────────────────────── الويب هوك (استقبال رسائل البوت) ─────────────────────────
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
@@ -318,7 +514,6 @@ def webhook():
     # طلب تأكيد ما قبل الدفع - إلزامي الرد عليه خلال 10 ثواني
     if "pre_checkout_query" in update:
         pcq = update["pre_checkout_query"]
-        # هون ممكن تضيف تحقق إضافي إذا حبيت (مثلاً التأكد إن المبلغ ضمن القيم المسموحة)
         answer_pre_checkout(pcq["id"], ok=True)
         return jsonify({"ok": True})
 
@@ -327,6 +522,15 @@ def webhook():
         msg = update["message"]
         chat_id = msg["chat"]["id"]
         text = msg.get("text", "")
+
+        # نحدّث اسم/يوزر المستخدم في جدول users عند أي رسالة
+        sender = msg.get("from", {})
+        if sender.get("id"):
+            upsert_user(
+                sender["id"],
+                username=sender.get("username"),
+                first_name=sender.get("first_name"),
+            )
 
         # دفعة ناجحة بنجوم تيليجرام
         if "successful_payment" in msg:
@@ -377,10 +581,18 @@ def webhook():
     # ضغطة على الزر (Callback Query)
     elif "callback_query" in update:
         cq = update["callback_query"]
-        user_id = cq["from"]["id"]
+        sender = cq.get("from", {})
+        user_id = sender["id"]
         chat_id = cq["message"]["chat"]["id"]
         callback_id = cq["id"]
         data_key = cq.get("data", "")
+
+        # نحدّث اسم/يوزر المستخدم في جدول users عند أي ضغطة زر أيضاً
+        upsert_user(
+            user_id,
+            username=sender.get("username"),
+            first_name=sender.get("first_name"),
+        )
 
         if data_key == "want_marry":
             if is_registered(user_id):
@@ -426,7 +638,6 @@ def set_webhook():
         return
     url = f"https://{domain}/webhook/{BOT_TOKEN}"
     try:
-        # allowed_updates لازم تتضمن pre_checkout_query عشان تيليجرام يرسلها للويب هوك
         r = requests.get(
             f"{TELEGRAM_API}/setWebhook",
             params={
