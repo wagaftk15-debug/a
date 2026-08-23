@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify, render_template
 app = Flask(__name__)
 
 # التوكن يُقرأ من متغير بيئة اسمه BOT_TOKEN (تضيفه من لوحة Railway)
-BOT_TOKEN = os.environ.get("8667627503:AAF3g679L4g5IxIS6s8Dhf7QM-tWug8_kFk", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATA_FILE = os.path.join(os.path.dirname(__file__), "data.json")
 
