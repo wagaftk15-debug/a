@@ -162,7 +162,7 @@ def webhook():
             keyboard = {
                 "inline_keyboard": [
                     [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
-                    [{"text": "🌐 شوف الموقع", "url": site_url}],
+                    [{"text": "🌐 ادخل", "web_app": {"url": site_url}}],
                 ]
             }
             send_message(
