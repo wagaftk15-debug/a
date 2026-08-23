@@ -107,7 +107,7 @@ HTML_PAGE = """
     <div class="subtitle">إحصائية حيّة من بوت التلقرام</div>
     <div class="count" id="count">{{ count }}</div>
     <p class="desc">شخص سجّل رغبته بالزواج حتى الآن</p>
-    <a class="btn" href="https://t.me/YOUR_BOT_USERNAME" target="_blank" rel="noopener">
+    <a class="btn" href="https://t.me/zawjoni" target="_blank" rel="noopener">
       سجّل نفسك عبر البوت
     </a>
   </div>
