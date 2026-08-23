@@ -2,7 +2,7 @@ import os
 import json
 import requests
 import psycopg2
-from flask import Flask, request, jsonify, render_template_string
+from flضask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
