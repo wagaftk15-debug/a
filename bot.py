@@ -13,8 +13,14 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # رابط قاعدة البيانات (يُضاف من لوحة Railway → Variables باسم DATABASE_URL)
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# آيدي شات الأدمن (اختياري) عشان يوصله إشعار بكل اقتراح جديد
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
+
 # قيم الدعم المتاحة بنجوم تيليجرام
 DONATION_AMOUNTS = [100, 200, 500, 1000]
+
+# سعر اقتراح فكرة/ميزة جديدة بنجوم تيليجرام
+SUGGESTION_PRICE = 100
 
 
 # ───────────────────────── تخزين البيانات (PostgreSQL) ─────────────────────────
@@ -62,6 +68,32 @@ def init_db():
             )
             """
         )
+
+        # اقتراحات الأفكار/الميزات المدفوعة
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS suggestions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                content TEXT,
+                telegram_payment_charge_id TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+
+        # حالة انتظار: تتبع لكل مستخدم شو البوت مستني منه كخطوة جاية (مثلاً نص الاقتراح بعد الدفع)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_actions (
+                user_id BIGINT PRIMARY KEY,
+                action TEXT NOT NULL,
+                charge_id TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+
         conn.commit()
         cur.close()
         conn.close()
@@ -223,6 +255,94 @@ def mask_name(name):
     return name[0] + "*" * (len(name) - 1)
 
 
+# ───────────────────────── اقتراحات الأفكار ─────────────────────────
+def set_pending_action(user_id, action, charge_id=None):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO pending_actions (user_id, action, charge_id, created_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+            SET action = EXCLUDED.action,
+                charge_id = EXCLUDED.charge_id,
+                created_at = NOW()
+            """,
+            (user_id, action, charge_id),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"set_pending_action error: {e}")
+
+
+def get_pending_action(user_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT action, charge_id FROM pending_actions WHERE user_id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return {"action": row[0], "charge_id": row[1]}
+        return None
+    except Exception as e:
+        print(f"get_pending_action error: {e}")
+        return None
+
+
+def clear_pending_action(user_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM pending_actions WHERE user_id = %s", (user_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"clear_pending_action error: {e}")
+
+
+def record_suggestion(user_id, content, charge_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO suggestions (user_id, content, telegram_payment_charge_id)
+            VALUES (%s, %s, %s)
+            """,
+            (user_id, content, charge_id),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"record_suggestion error: {e}")
+        return False
+
+
+def get_suggestions_count():
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM suggestions")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return count
+    except Exception as e:
+        print(f"get_suggestions_count error: {e}")
+        return 0
+
+
 # ───────────────────────── دوال تيليجرام ─────────────────────────
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -245,22 +365,46 @@ def answer_callback(callback_id, text):
         print(f"answer_callback error: {e}")
 
 
-def send_invoice(chat_id, amount):
-    """يرسل فاتورة دفع بنجوم تيليجرام (XTR). provider_token يجب أن يكون فارغاً للنجوم."""
+def send_invoice(chat_id, amount, title, description, payload_str):
+    """
+    يرسل فاتورة دفع بنجوم تيليجرام (XTR). provider_token يجب أن يكون فارغاً للنجوم.
+    payload_str بيتخزن جوا الفاتورة وبيرجع لنا بعد الدفع الناجح، بنستخدمه لنعرف
+    نوع العملية (دعم عادي، أو شراء اقتراح فكرة).
+    """
     payload = {
         "chat_id": chat_id,
-        "title": "دعم بوت زوجوني 💍",
-        "description": f"دعمك بقيمة {amount} نجمة تيليجرام بيساعدنا نكمل ونطوّر البوت 🙏",
-        "payload": f"donate_{amount}_{chat_id}",
+        "title": title,
+        "description": description,
+        "payload": payload_str,
         "provider_token": "",  # فارغ إلزامياً عند استخدام عملة النجوم XTR
         "currency": "XTR",
-        "prices": [{"label": f"دعم {amount} نجمة", "amount": amount}],
+        "prices": [{"label": title, "amount": amount}],
     }
     try:
         r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=10)
-        print(f"send_invoice({amount}) -> {r.json()}")
+        print(f"send_invoice({payload_str}) -> {r.json()}")
     except Exception as e:
         print(f"send_invoice error: {e}")
+
+
+def send_donation_invoice(chat_id, amount):
+    send_invoice(
+        chat_id,
+        amount,
+        "دعم بوت زوجوني 💍",
+        f"دعمك بقيمة {amount} نجمة تيليجرام بيساعدنا نكمل ونطوّر البوت 🙏",
+        f"donate_{amount}_{chat_id}",
+    )
+
+
+def send_suggestion_invoice(chat_id):
+    send_invoice(
+        chat_id,
+        SUGGESTION_PRICE,
+        "اقتراح فكرة جديدة 💡",
+        f"ادفع {SUGGESTION_PRICE} نجمة وابعتلنا فكرتك/اقتراحك لتطوير البوت، وفريقنا بيراجعها بجدّية",
+        f"suggest_{SUGGESTION_PRICE}_{chat_id}",
+    )
 
 
 def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
@@ -275,85 +419,331 @@ def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
 
 
 def donation_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": f"⭐ دعم بـ {amount} نجمة", "callback_data": f"donate_{amount}"}]
-            for amount in DONATION_AMOUNTS
-        ]
-    }
+    keyboard = [
+        [{"text": f"⭐ دعم بـ {amount} نجمة", "callback_data": f"donate_{amount}"}]
+        for amount in DONATION_AMOUNTS
+    ]
+    return {"inline_keyboard": keyboard}
 
 
-# ───────────────────────── صفحة الويب الرئيسية ─────────────────────────
-HTML_PAGE = """
+def notify_admin_new_suggestion(user_id, username, content):
+    if not ADMIN_CHAT_ID:
+        return
+    who = f"@{username}" if username else f"id:{user_id}"
+    send_message(
+        ADMIN_CHAT_ID,
+        f"💡 اقتراح جديد من {who}\n\n{content}",
+    )
+
+
+# ───────────────────────── واجهة الويب (تطبيق مصغّر ملء الشاشة) ─────────────────────────
+MINI_APP_PAGE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>بوت زوجوني 💍</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<title>زوجوني 💍</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
 <style>
-  * { box-sizing: border-box; }
-  body {
+  :root {
+    --bg-1: #241a35;
+    --bg-2: #120c1f;
+    --card: rgba(247, 237, 224, 0.05);
+    --card-line: rgba(247, 237, 224, 0.10);
+    --cream: #f7ede0;
+    --muted: #a89bc0;
+    --blush: #e2a38f;
+    --blush-deep: #c17d68;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    height: 100%;
     margin: 0;
-    min-height: 100vh;
+    overscroll-behavior: none;
+  }
+  body {
+    background: radial-gradient(130% 95% at 50% -5%, var(--bg-1) 0%, var(--bg-2) 65%);
+    font-family: 'Tajawal', 'Segoe UI', Tahoma, Arial, sans-serif;
+    color: var(--cream);
+  }
+
+  /* ───── هيكل التطبيق ───── */
+  .app {
+    height: 100dvh;
+    width: 100%;
+    max-width: 480px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-top: env(safe-area-inset-top, 0px);
+    position: relative;
+  }
+
+  .glow {
+    position: absolute;
+    top: -120px; right: -80px;
+    width: 320px; height: 320px;
+    background: radial-gradient(circle, rgba(226,163,143,0.16), transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ───── شريط علوي ───── */
+  .topbar {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, #1a1a2e, #16213e);
-    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
-    color: #f1f5f9;
+    gap: 9px;
+    padding: 16px 16px 6px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
   }
-  .card {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid #2e3a55;
-    border-radius: 24px;
-    padding: 40px 50px;
-    text-align: center;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-    max-width: 90vw;
+  .topbar svg { width: 21px; height: 21px; color: var(--blush); flex-shrink: 0; }
+  .topbar span {
+    font-family: 'Amiri', serif;
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
   }
-  h1 { font-size: 26px; margin: 0 0 6px 0; }
-  .subtitle { color: #8a9bb8; font-size: 13px; margin-bottom: 20px; }
+
+  /* ───── الصفحات ───── */
+  .view {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 8px 22px 28px;
+    position: relative;
+    z-index: 1;
+    animation: fadeIn 0.35s ease;
+  }
+  .view.active { display: flex; flex-direction: column; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* --- صفحة الرئيسية --- */
+  #view-home { align-items: center; justify-content: center; text-align: center; }
+  .flourish { width: 128px; height: 14px; opacity: 0.6; margin: 0 auto 24px; display: block; }
+  .hero-label {
+    color: var(--muted);
+    font-size: 13px;
+    letter-spacing: 0.4px;
+    margin-bottom: 10px;
+  }
   .count {
-    font-size: 64px;
-    font-weight: bold;
-    color: #c8a96e;
-    margin: 10px 0;
-    transition: transform 0.2s ease;
+    font-family: 'Amiri', serif;
+    font-size: clamp(64px, 20vw, 92px);
+    line-height: 1;
+    font-weight: 700;
+    color: var(--blush);
+    margin: 0;
+    transition: transform 0.25s ease;
   }
-  p.desc { color: #8a9bb8; font-size: 14px; margin: 0 0 20px 0; }
-  a.btn {
-    display: inline-block;
-    padding: 12px 28px;
-    background: #c8a96e;
-    color: #1a1a2e;
+  .count-desc {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.7;
+    margin: 16px 0 30px;
+    max-width: 270px;
+  }
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 36px;
+    background: linear-gradient(135deg, var(--blush), var(--blush-deep));
+    color: #1c1428;
     text-decoration: none;
     border-radius: 50px;
-    font-weight: bold;
-    transition: opacity 0.2s ease;
-    margin: 6px;
+    font-weight: 700;
+    font-size: 15px;
+    box-shadow: 0 14px 32px rgba(224, 160, 143, 0.22);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
   }
-  a.btn.secondary {
-    background: transparent;
-    border: 1px solid #c8a96e;
-    color: #c8a96e;
+  .cta:active { transform: scale(0.96); box-shadow: 0 6px 16px rgba(224, 160, 143, 0.18); }
+
+  /* --- صفحة الداعمين --- */
+  #view-donations { padding-top: 16px; }
+  .donations-summary {
+    display: flex;
+    justify-content: space-around;
+    background: var(--card);
+    border: 1px solid var(--card-line);
+    border-radius: 18px;
+    padding: 18px 10px;
+    margin-bottom: 18px;
+    flex-shrink: 0;
   }
-  a.btn:hover { opacity: 0.85; }
+  .stat { text-align: center; }
+  .stat b {
+    display: block;
+    font-family: 'Amiri', serif;
+    font-size: 27px;
+    color: var(--blush);
+  }
+  .stat span { font-size: 11px; color: var(--muted); }
+
+  .section-label {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 4px 2px 10px;
+  }
+  .list {
+    background: var(--card);
+    border: 1px solid var(--card-line);
+    border-radius: 18px;
+    overflow: hidden;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 17px;
+    border-bottom: 1px solid var(--card-line);
+  }
+  .row:last-child { border-bottom: none; }
+  .row .name { font-size: 14.5px; letter-spacing: 0.5px; }
+  .row .donated {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--blush);
+    white-space: nowrap;
+  }
+  .row .donated.zero { color: var(--muted); font-weight: 400; }
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13.5px;
+    padding: 44px 10px;
+  }
+
+  /* ───── زر "اقترح إضافة" العائم ───── */
+  .fab {
+    position: absolute;
+    z-index: 2;
+    left: 18px;
+    bottom: 18px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 12px 18px;
+    background: rgba(20, 14, 33, 0.92);
+    border: 1px solid rgba(226, 163, 143, 0.45);
+    color: var(--blush);
+    text-decoration: none;
+    border-radius: 50px;
+    font-size: 12.5px;
+    font-weight: 700;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(8px);
+    transition: transform 0.15s ease;
+  }
+  .fab:active { transform: scale(0.95); }
+  .fab svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+  /* ───── قسم الأزرار السفلي (التنقّل) ───── */
+  .tabbar {
+    flex-shrink: 0;
+    display: flex;
+    gap: 10px;
+    border-top: 1px solid var(--card-line);
+    background: rgba(18, 12, 31, 0.88);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+    position: relative;
+    z-index: 1;
+  }
+  .tab {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    background: none;
+    border: 1px solid transparent;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 12px 8px;
+    border-radius: 14px;
+    cursor: pointer;
+    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  }
+  .tab svg { width: 19px; height: 19px; flex-shrink: 0; }
+  .tab.active {
+    color: var(--blush);
+    background: rgba(226, 163, 143, 0.10);
+    border-color: rgba(226, 163, 143, 0.25);
+  }
 </style>
 </head>
 <body>
-  <div class="card">
-    <h1>بوت زوجوني 💍</h1>
-    <div class="subtitle">إحصائية حيّة من بوت التلقرام</div>
-    <div class="count" id="count">{{ count }}</div>
-    <p class="desc">شخص سجّل رغبته بالزواج حتى الآن</p>
-    <a class="btn" href="https://t.me/zawjoni" target="_blank" rel="noopener">
-      سجّل نفسك عبر البوت
+  <div class="app">
+    <div class="glow"></div>
+
+    <div class="topbar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+        <circle cx="9" cy="14" r="5.2"/>
+        <circle cx="15" cy="14" r="5.2"/>
+      </svg>
+      <span>زوجوني</span>
+    </div>
+
+    <main id="view-home" class="view active">
+      <svg class="flourish" viewBox="0 0 128 14" fill="none" stroke="#e2a38f" stroke-width="1">
+        <line x1="0" y1="7" x2="48" y2="7"/>
+        <circle cx="64" cy="7" r="4"/>
+        <line x1="80" y1="7" x2="128" y2="7"/>
+      </svg>
+      <div class="hero-label">شخص سجّل رغبته بالزواج حتى الآن</div>
+      <div class="count" id="count">{{ count }}</div>
+      <div class="count-desc">القائمة بتزيد كل يوم، سجّل حالك وخلّي حظك يشتغل 😄</div>
+      <a class="cta" href="https://t.me/zawjoni" target="_blank" rel="noopener">
+        سجّل نفسك عبر البوت
+      </a>
+    </main>
+
+    <main id="view-donations" class="view">
+      <div class="donations-summary">
+        <div class="stat"><b id="d-count">0</b><span>عملية دعم</span></div>
+        <div class="stat"><b id="d-total">0</b><span>نجمة إجمالي</span></div>
+      </div>
+      <div class="section-label">المسجلون</div>
+      <div class="list" id="users-list">
+        <div class="empty">جاري التحميل...</div>
+      </div>
+    </main>
+
+    <a class="fab" href="https://t.me/zawjoni?start=suggest" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M9 18h6"/><path d="M10 22h4"/>
+        <path d="M12 2a6 6 0 0 0-4 10.5c.6.5 1 1.3 1 2.1V16h6v-1.4c0-.8.4-1.6 1-2.1A6 6 0 0 0 12 2z"/>
+      </svg>
+      اقترح إضافة · {{ suggestion_price }} ⭐
     </a>
-    <a class="btn secondary" href="/users">
-      قائمة المسجلين
-    </a>
+
+    <nav class="tabbar">
+      <button class="tab active" data-view="home">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M4 11.5 12 5l8 6.5"/><path d="M6 10.5V19h12v-8.5"/>
+        </svg>
+        الرئيسية
+      </button>
+      <button class="tab" data-view="donations">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M12 3.5 14.2 9l6 .6-4.5 3.9 1.4 5.9L12 16.3 6.9 19.4l1.4-5.9L3.8 9.6l6-.6z"/>
+        </svg>
+        الداعمون
+      </button>
+    </nav>
   </div>
 
   <script>
@@ -361,7 +751,20 @@ HTML_PAGE = """
       const tg = window.Telegram.WebApp;
       tg.ready();
       tg.expand();
+      if (tg.setHeaderColor) { try { tg.setHeaderColor('#120c1f'); } catch (e) {} }
+      if (tg.setBackgroundColor) { try { tg.setBackgroundColor('#120c1f'); } catch (e) {} }
+      if (tg.disableVerticalSwipes) { try { tg.disableVerticalSwipes(); } catch (e) {} }
     }
+
+    const tabs = document.querySelectorAll('.tab');
+    const views = { home: document.getElementById('view-home'), donations: document.getElementById('view-donations') };
+
+    function showView(name) {
+      Object.entries(views).forEach(([key, el]) => el.classList.toggle('active', key === name));
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.view === name));
+      if (name === 'donations') loadDonations();
+    }
+    tabs.forEach(t => t.addEventListener('click', () => showView(t.dataset.view)));
 
     async function refreshCount() {
       try {
@@ -370,100 +773,39 @@ HTML_PAGE = """
         const el = document.getElementById('count');
         if (el.textContent != data.count) {
           el.textContent = data.count;
-          el.style.transform = 'scale(1.15)';
+          el.style.transform = 'scale(1.12)';
           setTimeout(() => { el.style.transform = 'scale(1)'; }, 200);
         }
-      } catch (e) {
-        console.error('تعذر تحديث العدد', e);
-      }
+      } catch (e) { console.error('تعذر تحديث العدد', e); }
     }
+
+    async function loadDonations() {
+      try {
+        const [statsRes, usersRes] = await Promise.all([fetch('/api/donations'), fetch('/api/users')]);
+        const stats = await statsRes.json();
+        const usersData = await usersRes.json();
+        document.getElementById('d-count').textContent = stats.donations_count;
+        document.getElementById('d-total').textContent = stats.stars_total;
+
+        const list = document.getElementById('users-list');
+        if (!usersData.users || usersData.users.length === 0) {
+          list.innerHTML = '<div class="empty">ما في حدا مسجل لسا 🙂</div>';
+          return;
+        }
+        list.innerHTML = usersData.users.map(u => `
+          <div class="row">
+            <span class="name">${u.masked_name}</span>
+            <span class="donated ${u.donated === 0 ? 'zero' : ''}">${u.donated} ⭐</span>
+          </div>
+        `).join('');
+      } catch (e) { console.error('تعذر تحميل قائمة الداعمين', e); }
+    }
+
+    refreshCount();
     setInterval(refreshCount, 5000);
-  </script>
-</body>
-</html>
-"""
 
-
-# ───────────────────────── صفحة قائمة المسجلين + التبرعات ─────────────────────────
-USERS_PAGE = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>قائمة المسجلين - بوت زوجوني 💍</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    background: linear-gradient(135deg, #1a1a2e, #16213e);
-    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
-    color: #f1f5f9;
-    padding: 24px 12px;
-  }
-  .wrap { max-width: 560px; margin: 0 auto; }
-  h1 { font-size: 22px; text-align: center; margin-bottom: 4px; }
-  .subtitle { color: #8a9bb8; font-size: 13px; text-align: center; margin-bottom: 20px; }
-  .list {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid #2e3a55;
-    border-radius: 16px;
-    overflow: hidden;
-  }
-  .row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 14px 18px;
-    border-bottom: 1px solid #2e3a55;
-  }
-  .row:last-child { border-bottom: none; }
-  .name { font-size: 15px; letter-spacing: 1px; }
-  .donated {
-    font-size: 14px;
-    color: #c8a96e;
-    font-weight: bold;
-    white-space: nowrap;
-  }
-  .donated.zero { color: #5a6a88; font-weight: normal; }
-  .empty { text-align: center; color: #8a9bb8; padding: 30px 10px; }
-  a.back {
-    display: block;
-    text-align: center;
-    color: #c8a96e;
-    text-decoration: none;
-    margin-top: 20px;
-    font-size: 13px;
-  }
-</style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>قائمة المسجلين 💍</h1>
-    <div class="subtitle">{{ users|length }} شخص مسجّل</div>
-    <div class="list">
-      {% for u in users %}
-      <div class="row">
-        <span class="name">{{ u.masked_name }}</span>
-        <span class="donated {{ 'zero' if u.donated == 0 else '' }}">
-          {{ u.donated }} ⭐
-        </span>
-      </div>
-      {% else %}
-      <div class="empty">ما في حدا مسجل لسا 🙂</div>
-      {% endfor %}
-    </div>
-    <a class="back" href="/">⬅ رجوع للصفحة الرئيسية</a>
-  </div>
-
-  <script>
-    if (window.Telegram && window.Telegram.WebApp) {
-      const tg = window.Telegram.WebApp;
-      tg.ready();
-      tg.expand();
-    }
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('tab') === 'donations') showView('donations');
   </script>
 </body>
 </html>
@@ -473,15 +815,14 @@ USERS_PAGE = """
 @app.route("/")
 def home():
     count = get_count()
-    return render_template_string(HTML_PAGE, count=count)
+    return render_template_string(MINI_APP_PAGE, count=count, suggestion_price=SUGGESTION_PRICE)
 
 
 @app.route("/users")
 def users_page():
-    users = get_registered_users_with_donations()
-    for u in users:
-        u["masked_name"] = mask_name(u["name"])
-    return render_template_string(USERS_PAGE, users=users)
+    """رابط قديم متوافق: نفس التطبيق مفتوح على تبويب الداعمين."""
+    count = get_count()
+    return render_template_string(MINI_APP_PAGE, count=count, suggestion_price=SUGGESTION_PRICE)
 
 
 @app.route("/api/count")
@@ -497,7 +838,7 @@ def api_donations():
 
 @app.route("/api/users")
 def api_users():
-    """نفس بيانات صفحة /users لكن بصيغة JSON (الاسم معتّم أيضاً)."""
+    """قائمة المسجلين مع الاسم معتّماً (حرف أول ظاهر فقط) ومجموع تبرع كل واحد."""
     users = get_registered_users_with_donations()
     result = [
         {"masked_name": mask_name(u["name"]), "donated": u["donated"]}
@@ -521,45 +862,67 @@ def webhook():
     if "message" in update:
         msg = update["message"]
         chat_id = msg["chat"]["id"]
-        text = msg.get("text", "")
+        text = msg.get("text", "") or ""
 
-        # نحدّث اسم/يوزر المستخدم في جدول users عند أي رسالة
         sender = msg.get("from", {})
-        if sender.get("id"):
-            upsert_user(
-                sender["id"],
-                username=sender.get("username"),
-                first_name=sender.get("first_name"),
-            )
+        user_id = sender.get("id")
+        if user_id:
+            upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
-        # دفعة ناجحة بنجوم تيليجرام
+        # دفعة ناجحة بنجوم تيليجرام (دعم أو شراء اقتراح)
         if "successful_payment" in msg:
             sp = msg["successful_payment"]
-            amount = sp.get("total_amount", 0)  # بعملة XTR القيمة = عدد النجوم مباشرة
+            amount = sp.get("total_amount", 0)
             charge_id = sp.get("telegram_payment_charge_id")
-            user_id = msg["from"]["id"]
-            record_donation(user_id, amount, charge_id)
-            send_message(
-                chat_id,
-                f"شكراً إلك من قلبنا 🙏💛\nتم استلام دعمك بقيمة {amount} نجمة ⭐️\nالله يجزيك الخير!",
-            )
+            invoice_payload = sp.get("invoice_payload", "") or ""
+
+            if invoice_payload.startswith("suggest_"):
+                # هاي دفعة اقتراح فكرة: منستنى الرسالة الجاية منه وتنحط كمحتوى الاقتراح
+                set_pending_action(user_id, "awaiting_suggestion", charge_id)
+                send_message(
+                    chat_id,
+                    "تم الدفع بنجاح 💡\nهلأ اكتبلنا فكرتك أو اقتراحك بالتفصيل برسالة وحدة، وبنوصّلها لفريق التطوير مباشرة 🙏",
+                )
+            else:
+                record_donation(user_id, amount, charge_id)
+                send_message(
+                    chat_id,
+                    f"شكراً إلك من قلبنا 🙏💛\nتم استلام دعمك بقيمة {amount} نجمة ⭐️\nالله يجزيك الخير!",
+                )
             return jsonify({"ok": True})
 
-        if text == "/start":
-            site_url = f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')}"
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
-                    [{"text": "🌐 ادخل", "web_app": {"url": site_url}}],
-                    [{"text": "⭐ ادعم البوت", "callback_data": "show_donate"}],
-                ]
-            }
-            send_message(
-                chat_id,
-                "أهلاً فيك في بوت زوجوني 💍\n"
-                "اضغط الزر تحت إذا بدك تسجل حالك ضمن قائمة المستعدين للزواج 😄",
-                keyboard,
-            )
+        # لو في اقتراح مدفوع مستني نصّه، ونص الرسالة الحالية مش أمر (يبدأ بـ /)
+        pending = get_pending_action(user_id) if user_id else None
+        if pending and pending["action"] == "awaiting_suggestion" and text and not text.startswith("/"):
+            record_suggestion(user_id, text, pending.get("charge_id"))
+            clear_pending_action(user_id)
+            send_message(chat_id, "وصلتنا فكرتك وسجّلناها ✅ شكراً إلك على وقتك واهتمامك 🙏💡")
+            notify_admin_new_suggestion(user_id, sender.get("username"), text)
+            return jsonify({"ok": True})
+
+        if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            start_payload = parts[1].strip() if len(parts) > 1 else ""
+
+            if start_payload == "suggest":
+                # جاي من زر "اقترح إضافة" بالموقع: نرسله فاتورة الاقتراح مباشرة
+                send_suggestion_invoice(chat_id)
+            else:
+                site_url = f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')}"
+                keyboard = {
+                    "inline_keyboard": [
+                        [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
+                        [{"text": "🌐 ادخل", "web_app": {"url": site_url}}],
+                        [{"text": "⭐ ادعم البوت", "callback_data": "show_donate"}],
+                        [{"text": "💡 اقترح إضافة", "callback_data": "propose_idea"}],
+                    ]
+                }
+                send_message(
+                    chat_id,
+                    "أهلاً فيك في بوت زوجوني 💍\n"
+                    "اضغط الزر تحت إذا بدك تسجل حالك ضمن قائمة المستعدين للزواج 😄",
+                    keyboard,
+                )
 
         elif text in ("/عدد", "/count"):
             send_message(chat_id, f"عدد الأشخاص المسجلين لحد الآن: {get_count()} 💍")
@@ -578,6 +941,12 @@ def webhook():
                 f"عدد عمليات الدعم: {count}\nإجمالي النجوم المستلمة: {total} ⭐️",
             )
 
+        elif text in ("/اقترح", "/suggest"):
+            send_suggestion_invoice(chat_id)
+
+        elif text in ("/الاقتراحات", "/suggestions") and str(chat_id) == str(ADMIN_CHAT_ID):
+            send_message(chat_id, f"عدد الاقتراحات المستلمة: {get_suggestions_count()} 💡")
+
     # ضغطة على الزر (Callback Query)
     elif "callback_query" in update:
         cq = update["callback_query"]
@@ -587,12 +956,7 @@ def webhook():
         callback_id = cq["id"]
         data_key = cq.get("data", "")
 
-        # نحدّث اسم/يوزر المستخدم في جدول users عند أي ضغطة زر أيضاً
-        upsert_user(
-            user_id,
-            username=sender.get("username"),
-            first_name=sender.get("first_name"),
-        )
+        upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
         if data_key == "want_marry":
             if is_registered(user_id):
@@ -623,9 +987,13 @@ def webhook():
                 amount = 0
             if amount in DONATION_AMOUNTS:
                 answer_callback(callback_id, f"جاري تجهيز فاتورة {amount} نجمة ⭐")
-                send_invoice(chat_id, amount)
+                send_donation_invoice(chat_id, amount)
             else:
                 answer_callback(callback_id, "قيمة غير صالحة 🙏")
+
+        elif data_key == "propose_idea":
+            answer_callback(callback_id, f"جاري تجهيز فاتورة {SUGGESTION_PRICE} نجمة ⭐")
+            send_suggestion_invoice(chat_id)
 
     return jsonify({"ok": True})
 
