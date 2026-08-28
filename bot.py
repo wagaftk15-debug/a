@@ -537,6 +537,21 @@ def notify_admin_new_suggestion(user_id, username, content):
     )
 
 
+# ───────────────────────── رابط الموقع البسيط ─────────────────────────
+def get_site_url():
+    """
+    يبني رابط الموقع البسيط اعتماداً على دومين Railway العام.
+    يمكن كمان تحديده يدوياً عبر متغير بيئة APP_URL لو حابب تستخدم دومين خاص.
+    """
+    manual = os.environ.get("APP_URL", "").strip()
+    if manual:
+        return manual.rstrip("/")
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if domain:
+        return f"https://{domain}"
+    return ""
+
+
 # ───────────────────────── الويب هوك (استقبال رسائل البوت) ─────────────────────────
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
@@ -607,6 +622,7 @@ def webhook():
                         ],
                         [{"text": "⭐ ادعم البوت", "callback_data": "show_donate"}],
                         [{"text": "💡 اقترح إضافة", "callback_data": "propose_idea"}],
+                        [{"text": "🌐 موقع البوت", "url": get_site_url() or "https://t.me"}],
                         [{"text": "❌ إلغاء الاشتراك", "callback_data": "unsubscribe"}],
                     ]
                 }
@@ -645,6 +661,17 @@ def webhook():
 
         elif text in ("/الصدارة", "/leaderboard"):
             send_message(chat_id, build_leaderboard_text())
+
+        elif text in ("/الموقع", "/site", "/website"):
+            site_url = get_site_url()
+            if site_url:
+                send_message(
+                    chat_id,
+                    "🌐 تقدر تزور موقع البوت من هون:",
+                    {"inline_keyboard": [[{"text": "فتح الموقع", "url": site_url}]]},
+                )
+            else:
+                send_message(chat_id, "الموقع مش جاهز حالياً، حاول لاحقاً 🙏")
 
         elif text in ("/انسحب", "/unsubscribe"):
             if is_registered(user_id):
@@ -749,6 +776,154 @@ def webhook():
             answer_callback(callback_id, "تم التراجع 👍")
 
     return jsonify({"ok": True})
+
+
+# ───────────────────────── الموقع البسيط (صفحة تعريفية + إحصائيات حية) ─────────────────────────
+SITE_TEMPLATE = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>بوت زوجوني 💍</title>
+<style>
+  :root {{
+    --pink: #ff5a8a;
+    --purple: #7b3fe4;
+    --bg: #0f0a1e;
+    --card: rgba(255,255,255,0.06);
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0;
+    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+    background: radial-gradient(circle at top, #241a3d 0%, var(--bg) 70%);
+    color: #fff;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 16px;
+  }}
+  .logo {{ font-size: 56px; margin-bottom: 8px; }}
+  h1 {{
+    font-size: 28px;
+    margin: 0 0 6px;
+    background: linear-gradient(90deg, var(--pink), var(--purple));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }}
+  p.subtitle {{ color: #cfc7e6; margin: 0 0 32px; text-align: center; max-width: 420px; }}
+  .stats {{
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    width: 100%;
+    max-width: 480px;
+    margin-bottom: 32px;
+  }}
+  .stat {{
+    background: var(--card);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    padding: 18px 10px;
+    text-align: center;
+  }}
+  .stat .num {{ font-size: 22px; font-weight: bold; color: var(--pink); }}
+  .stat .label {{ font-size: 12px; color: #cfc7e6; margin-top: 4px; }}
+  .card {{
+    background: var(--card);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 20px;
+    padding: 22px;
+    width: 100%;
+    max-width: 480px;
+    margin-bottom: 20px;
+  }}
+  .card h2 {{ font-size: 16px; margin: 0 0 14px; color: #fff; }}
+  .row {{
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    font-size: 14px;
+  }}
+  .row:last-child {{ border-bottom: none; }}
+  .btn {{
+    display: inline-block;
+    margin-top: 8px;
+    background: linear-gradient(90deg, var(--pink), var(--purple));
+    color: #fff;
+    text-decoration: none;
+    padding: 14px 32px;
+    border-radius: 30px;
+    font-weight: bold;
+    font-size: 15px;
+  }}
+  footer {{ margin-top: 20px; font-size: 12px; color: #7a7295; }}
+</style>
+</head>
+<body>
+  <div class="logo">💍</div>
+  <h1>بوت زوجوني</h1>
+  <p class="subtitle">منصّة بسيطة على تيليجرام لتسجيل الراغبين بالزواج، بالإضافة لنظام نقاط يومي ولوحة صدارة.</p>
+
+  <div class="stats">
+    <div class="stat"><div class="num">{registered_count}</div><div class="label">مسجّل 💍</div></div>
+    <div class="stat"><div class="num">{donations_total}</div><div class="label">نجمة دعم ⭐</div></div>
+    <div class="stat"><div class="num">{suggestions_count}</div><div class="label">اقتراح 💡</div></div>
+  </div>
+
+  <div class="card">
+    <h2>🏆 لائحة الصدارة</h2>
+    {leaderboard_rows}
+  </div>
+
+  <a class="btn" href="{bot_link}" target="_blank">فتح البوت على تيليجرام</a>
+  <footer>بوت زوجوني — {year}</footer>
+</body>
+</html>"""
+
+
+@app.route("/")
+def site_home():
+    from datetime import datetime
+
+    registered_count = get_count()
+    _, donations_total = get_donations_stats()
+    suggestions_count = get_suggestions_count()
+    top = get_leaderboard(10)
+
+    if top:
+        medals = ["🥇", "🥈", "🥉"]
+        rows_html = ""
+        for i, u in enumerate(top):
+            icon = medals[i] if i < len(medals) else f"{i + 1}."
+            rows_html += (
+                f'<div class="row"><span>{icon} {mask_name(u["name"])}</span>'
+                f'<span>{u["points"]} نقطة</span></div>'
+            )
+    else:
+        rows_html = '<div class="row"><span>لسا محدا كسب نقاط 🙂</span></div>'
+
+    bot_link = "https://t.me"
+    try:
+        me = requests.get(f"{TELEGRAM_API}/getMe", timeout=5).json()
+        username = me.get("result", {}).get("username")
+        if username:
+            bot_link = f"https://t.me/{username}"
+    except Exception as e:
+        print(f"getMe error: {e}")
+
+    html = SITE_TEMPLATE.format(
+        registered_count=registered_count,
+        donations_total=donations_total,
+        suggestions_count=suggestions_count,
+        leaderboard_rows=rows_html,
+        bot_link=bot_link,
+        year=datetime.now().year,
+    )
+    return html
 
 
 # ───────────────────────── تفعيل الويب هوك تلقائياً ─────────────────────────
