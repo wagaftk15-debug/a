@@ -20,7 +20,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 DONATION_AMOUNTS = [100, 200, 500, 1000]
 
 # سعر اقتراح فكرة/ميزة جديدة بنجوم تيليجرام
-SUGGESTION_PRICE = 100
+SUGGESTION_PRICE = 1
 
 # عدد نقاط المكافأة اليومية
 DAILY_POINTS = 100
