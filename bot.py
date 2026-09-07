@@ -3,26 +3,19 @@ import json
 import requests
 import psycopg2
 from flask import Flask, request, jsonify
+from datetime import datetime
 
 app = Flask(__name__)
 
-# التوكن يُقرأ من متغير بيئة اسمه BOT_TOKEN (تُضاف من لوحة Railway → Variables)
+# التوكن والإعدادات
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-# رابط قاعدة البيانات (يُضاف من لوحة Railway → Variables باسم DATABASE_URL)
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
-
-# آيدي شات الأدمن (اختياري) عشان يوصله إشعار بكل اقتراح جديد
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
-# قيم الدعم المتاحة بنجوم تيليجرام
+# قيم الدعم والاقتراحات
 DONATION_AMOUNTS = [100, 200, 500, 1000]
-
-# سعر اقتراح فكرة/ميزة جديدة بنجوم تيليجرام
 SUGGESTION_PRICE = 1
-
-# عدد نقاط المكافأة اليومية
 DAILY_POINTS = 100
 
 
@@ -32,15 +25,14 @@ def get_connection():
 
 
 def init_db():
-    """ينشئ الجداول المطلوبة إذا لم تكن موجودة، يُنفَّذ مرة عند بدء التطبيق."""
+    """ينشئ الجداول المطلوبة إذا لم تكن موجودة"""
     if not DATABASE_URL:
-        print("DATABASE_URL غير موجود، لن يتم الاتصال بقاعدة البيانات.")
+        print("DATABASE_URL غير موجود")
         return
     try:
         conn = get_connection()
         cur = conn.cursor()
 
-        # جدول عام لكل مستخدم تفاعل مع البوت (يخزن آخر اسم/يوزر معروف له)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -60,6 +52,7 @@ def init_db():
             )
             """
         )
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS donations (
@@ -72,7 +65,6 @@ def init_db():
             """
         )
 
-        # اقتراحات الأفكار/الميزات المدفوعة
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS suggestions (
@@ -85,7 +77,6 @@ def init_db():
             """
         )
 
-        # حالة انتظار: تتبع لكل مستخدم شو البوت مستني منه كخطوة جاية (مثلاً نص الاقتراح بعد الدفع)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS pending_actions (
@@ -97,7 +88,6 @@ def init_db():
             """
         )
 
-        # نقاط المستخدمين (مكافأة يومية بالضغط على زر مخصص)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS user_points (
@@ -108,16 +98,31 @@ def init_db():
             """
         )
 
+        # جديد: جدول لمتابعة حالة الدفعات من الويب
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS web_payments (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                type TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                telegram_payment_charge_id TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+
         conn.commit()
         cur.close()
         conn.close()
-        print("تم تجهيز قاعدة البيانات بنجاح.")
+        print("✅ تم تجهيز قاعدة البيانات بنجاح")
     except Exception as e:
-        print(f"فشل تجهيز قاعدة البيانات: {e}")
+        print(f"❌ فشل تجهيز قاعدة البيانات: {e}")
 
 
 def upsert_user(user_id, username=None, first_name=None):
-    """يحفظ/يحدّث آخر اسم مستخدم معروف لكل شخص تفاعل مع البوت."""
+    """يحفظ/يحدّث بيانات المستخدم"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -140,6 +145,7 @@ def upsert_user(user_id, username=None, first_name=None):
 
 
 def get_count():
+    """عدد المسجلين"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -154,6 +160,7 @@ def get_count():
 
 
 def is_registered(user_id):
+    """التحقق من التسجيل"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -168,7 +175,7 @@ def is_registered(user_id):
 
 
 def register_user(user_id):
-    """يسجل المستخدم ويرجع True لو نجح، False لو كان مسجل مسبقاً."""
+    """تسجيل المستخدم"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -187,7 +194,7 @@ def register_user(user_id):
 
 
 def record_donation(user_id, amount, charge_id):
-    """يسجل عملية دعم ناجحة في جدول donations."""
+    """تسجيل عملية دعم"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -208,7 +215,7 @@ def record_donation(user_id, amount, charge_id):
 
 
 def get_donations_stats():
-    """يرجع (عدد عمليات الدعم، مجموع النجوم) من جدول donations."""
+    """إحصائيات الدعم"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -222,74 +229,8 @@ def get_donations_stats():
         return 0, 0
 
 
-def mask_name(name):
-    """
-    يعتم كل حروف الاسم ما عدا الحرف الأول (يبقى ظاهر بدون تعتيم).
-    مثال: "أحمد" -> "أ***"
-    """
-    if not name:
-        return "*"
-    name = str(name).strip()
-    if len(name) <= 1:
-        return name
-    return name[0] + "*" * (len(name) - 1)
-
-
-# ───────────────────────── اقتراحات الأفكار ─────────────────────────
-def set_pending_action(user_id, action, charge_id=None):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO pending_actions (user_id, action, charge_id, created_at)
-            VALUES (%s, %s, %s, NOW())
-            ON CONFLICT (user_id) DO UPDATE
-            SET action = EXCLUDED.action,
-                charge_id = EXCLUDED.charge_id,
-                created_at = NOW()
-            """,
-            (user_id, action, charge_id),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"set_pending_action error: {e}")
-
-
-def get_pending_action(user_id):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT action, charge_id FROM pending_actions WHERE user_id = %s",
-            (user_id,),
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row:
-            return {"action": row[0], "charge_id": row[1]}
-        return None
-    except Exception as e:
-        print(f"get_pending_action error: {e}")
-        return None
-
-
-def clear_pending_action(user_id):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM pending_actions WHERE user_id = %s", (user_id,))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"clear_pending_action error: {e}")
-
-
 def record_suggestion(user_id, content, charge_id):
+    """تسجيل اقتراح"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -310,6 +251,7 @@ def record_suggestion(user_id, content, charge_id):
 
 
 def get_suggestions_count():
+    """عدد الاقتراحات"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -323,9 +265,8 @@ def get_suggestions_count():
         return 0
 
 
-# ───────────────────────── إلغاء الاشتراك (الانسحاب) ─────────────────────────
 def unregister_user(user_id):
-    """يحذف المستخدم من جدول registrations. يرجع True لو كان مسجل وانحذف فعلاً."""
+    """إلغاء التسجيل"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -340,13 +281,8 @@ def unregister_user(user_id):
         return False
 
 
-# ───────────────────────── نظام النقاط اليومية ─────────────────────────
 def claim_daily_points(user_id):
-    """
-    يحاول منح المستخدم DAILY_POINTS نقطة لهاليوم.
-    يرجع (True, المجموع_الجديد) لو نجحت العملية (أول مرة اليوم).
-    يرجع (False, المجموع_الحالي) لو كان خد نقاطه اليوم مسبقاً.
-    """
+    """مطالبة النقاط اليومية"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -369,7 +305,6 @@ def claim_daily_points(user_id):
             conn.close()
             return True, row[0]
 
-        # ما انحدث أي شيء يعني خد نقاطه اليوم مسبقاً، منجيب مجموعه الحالي
         cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
         existing = cur.fetchone()
         conn.commit()
@@ -382,6 +317,7 @@ def claim_daily_points(user_id):
 
 
 def get_user_points(user_id):
+    """الحصول على نقاط المستخدم"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -396,7 +332,7 @@ def get_user_points(user_id):
 
 
 def get_leaderboard(limit=10):
-    """يرجع أعلى المستخدمين نقاطاً (اسم + مجموع نقاط)."""
+    """لائحة الصدارة"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -423,9 +359,31 @@ def get_leaderboard(limit=10):
         return []
 
 
+def mask_name(name):
+    """تعتيم الاسم (يبقى أول حرف ظاهر)"""
+    if not name:
+        return "*"
+    name = str(name).strip()
+    if len(name) <= 1:
+        return name
+    return name[0] + "*" * (len(name) - 1)
+
+
+def get_site_url():
+    """الحصول على رابط الموقع"""
+    manual = os.environ.get("APP_URL", "").strip()
+    if manual:
+        return manual.rstrip("/")
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if domain:
+        return f"https://{domain}"
+    return ""
+
+
 # ───────────────────────── دوال تيليجرام ─────────────────────────
 def send_message(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text}
+    """إرسال رسالة"""
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     try:
@@ -435,6 +393,7 @@ def send_message(chat_id, text, reply_markup=None):
 
 
 def answer_callback(callback_id, text, show_alert=False):
+    """الرد على زر"""
     try:
         requests.post(
             f"{TELEGRAM_API}/answerCallbackQuery",
@@ -446,17 +405,13 @@ def answer_callback(callback_id, text, show_alert=False):
 
 
 def send_invoice(chat_id, amount, title, description, payload_str):
-    """
-    يرسل فاتورة دفع بنجوم تيليجرام (XTR). provider_token يجب أن يكون فارغاً للنجوم.
-    payload_str بيتخزن جوا الفاتورة وبيرجع لنا بعد الدفع الناجح، بنستخدمه لنعرف
-    نوع العملية (دعم عادي، أو شراء اقتراح فكرة).
-    """
+    """إرسال فاتورة"""
     payload = {
         "chat_id": chat_id,
         "title": title,
         "description": description,
         "payload": payload_str,
-        "provider_token": "",  # فارغ إلزامياً عند استخدام عملة النجوم XTR
+        "provider_token": "",
         "currency": "XTR",
         "prices": [{"label": title, "amount": amount}],
     }
@@ -467,28 +422,8 @@ def send_invoice(chat_id, amount, title, description, payload_str):
         print(f"send_invoice error: {e}")
 
 
-def send_donation_invoice(chat_id, amount):
-    send_invoice(
-        chat_id,
-        amount,
-        "دعم بوت زوجوني 💍",
-        f"دعمك بقيمة {amount} نجمة تيليجرام بيساعدنا نكمل ونطوّر البوت 🙏",
-        f"donate_{amount}_{chat_id}",
-    )
-
-
-def send_suggestion_invoice(chat_id):
-    send_invoice(
-        chat_id,
-        SUGGESTION_PRICE,
-        "اقتراح فكرة جديدة 💡",
-        f"ادفع {SUGGESTION_PRICE} نجمة وابعتلنا فكرتك/اقتراحك لتطوير البوت، وفريقنا بيراجعها بجدّية",
-        f"suggest_{SUGGESTION_PRICE}_{chat_id}",
-    )
-
-
 def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
-    """يجب الرد على pre_checkout_query خلال 10 ثواني وإلا يُرفض الدفع تلقائياً."""
+    """الرد على طلب ما قبل الدفع"""
     payload = {"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}
     if error_message:
         payload["error_message"] = error_message
@@ -499,6 +434,7 @@ def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
 
 
 def donation_keyboard():
+    """لوحة مفاتيح الدعم"""
     keyboard = [
         [{"text": f"⭐ دعم بـ {amount} نجمة", "callback_data": f"donate_{amount}"}]
         for amount in DONATION_AMOUNTS
@@ -506,21 +442,28 @@ def donation_keyboard():
     return {"inline_keyboard": keyboard}
 
 
-def unsubscribe_confirm_keyboard():
+def main_keyboard():
+    """اللوحة الرئيسية"""
     return {
         "inline_keyboard": [
-            [{"text": "✅ نعم، بدي انسحب", "callback_data": "confirm_unsubscribe"}],
-            [{"text": "🙅 لأ، تراجعت", "callback_data": "cancel_unsubscribe"}],
+            [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
+            [
+                {"text": "🎁 نقاط اليوم", "callback_data": "claim_points"},
+                {"text": "🏆 الصدارة", "callback_data": "show_leaderboard"},
+            ],
+            [{"text": "💻 فتح الموقع", "web_app": {"url": get_site_url() or "https://t.me"}}],
+            [{"text": "❌ إلغاء الاشتراك", "callback_data": "unsubscribe"}],
         ]
     }
 
 
 def build_leaderboard_text():
+    """بناء نص لائحة الصدارة"""
     top = get_leaderboard(10)
     if not top:
-        return "لسا محدا كسب نقاط 🙂 كون أول واحد يجمع نقاط اليوم!"
+        return "لسا محدا كسب نقاط 🙂"
     medals = ["🥇", "🥈", "🥉"]
-    lines = ["🏆 لائحة الصدارة بالنقاط:\n"]
+    lines = ["🏆 <b>لائحة الصدارة بالنقاط:</b>\n"]
     for i, u in enumerate(top):
         rank_icon = medals[i] if i < len(medals) else f"{i + 1}."
         lines.append(f"{rank_icon} {mask_name(u['name'])} — {u['points']} نقطة")
@@ -528,42 +471,28 @@ def build_leaderboard_text():
 
 
 def notify_admin_new_suggestion(user_id, username, content):
+    """إشعار الأدمن باقتراح جديد"""
     if not ADMIN_CHAT_ID:
         return
     who = f"@{username}" if username else f"id:{user_id}"
     send_message(
         ADMIN_CHAT_ID,
-        f"💡 اقتراح جديد من {who}\n\n{content}",
+        f"💡 <b>اقتراح جديد من</b> {who}\n\n{content}",
     )
 
 
-# ───────────────────────── رابط الموقع البسيط ─────────────────────────
-def get_site_url():
-    """
-    يبني رابط الموقع البسيط اعتماداً على دومين Railway العام.
-    يمكن كمان تحديده يدوياً عبر متغير بيئة APP_URL لو حابب تستخدم دومين خاص.
-    """
-    manual = os.environ.get("APP_URL", "").strip()
-    if manual:
-        return manual.rstrip("/")
-    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
-    if domain:
-        return f"https://{domain}"
-    return ""
-
-
-# ───────────────────────── الويب هوك (استقبال رسائل البوت) ─────────────────────────
+# ───────────────────────── الويب هوك (Webhook) ─────────────────────────
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = request.get_json(force=True, silent=True) or {}
 
-    # طلب تأكيد ما قبل الدفع - إلزامي الرد عليه خلال 10 ثواني
+    # طلب تأكيد ما قبل الدفع
     if "pre_checkout_query" in update:
         pcq = update["pre_checkout_query"]
         answer_pre_checkout(pcq["id"], ok=True)
         return jsonify({"ok": True})
 
-    # رسالة نصية عادية (مثل /start) أو إشعار دفع ناجح
+    # رسالة نصية أو دفعة
     if "message" in update:
         msg = update["message"]
         chat_id = msg["chat"]["id"]
@@ -574,7 +503,7 @@ def webhook():
         if user_id:
             upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
-        # دفعة ناجحة بنجوم تيليجرام (دعم أو شراء اقتراح)
+        # دفعة ناجحة
         if "successful_payment" in msg:
             sp = msg["successful_payment"]
             amount = sp.get("total_amount", 0)
@@ -582,108 +511,51 @@ def webhook():
             invoice_payload = sp.get("invoice_payload", "") or ""
 
             if invoice_payload.startswith("suggest_"):
-                # هاي دفعة اقتراح فكرة: منستنى الرسالة الجاية منه وتنحط كمحتوى الاقتراح
-                set_pending_action(user_id, "awaiting_suggestion", charge_id)
                 send_message(
                     chat_id,
-                    "تم الدفع بنجاح 💡\nهلأ اكتبلنا فكرتك أو اقتراحك بالتفصيل برسالة وحدة، وبنوصّلها لفريق التطوير مباشرة 🙏",
+                    "✅ تم الدفع بنجاح 💡\nهلأ اكتبلنا فكرتك:",
                 )
             else:
                 record_donation(user_id, amount, charge_id)
                 send_message(
                     chat_id,
-                    f"شكراً إلك من قلبنا 🙏💛\nتم استلام دعمك بقيمة {amount} نجمة ⭐️\nالله يجزيك الخير!",
+                    f"💛 شكراً إلك!\nتم استلام دعمك: <b>{amount} نجمة</b> ⭐️",
                 )
-            return jsonify({"ok": True})
-
-        # لو في اقتراح مدفوع مستني نصّه، ونص الرسالة الحالية مش أمر (يبدأ بـ /)
-        pending = get_pending_action(user_id) if user_id else None
-        if pending and pending["action"] == "awaiting_suggestion" and text and not text.startswith("/"):
-            record_suggestion(user_id, text, pending.get("charge_id"))
-            clear_pending_action(user_id)
-            send_message(chat_id, "وصلتنا فكرتك وسجّلناها ✅ شكراً إلك على وقتك واهتمامك 🙏💡")
-            notify_admin_new_suggestion(user_id, sender.get("username"), text)
             return jsonify({"ok": True})
 
         if text.startswith("/start"):
-            parts = text.split(maxsplit=1)
-            start_payload = parts[1].strip() if len(parts) > 1 else ""
-
-            if start_payload == "suggest":
-                # جاي من زر "اقترح إضافة": نرسله فاتورة الاقتراح مباشرة
-                send_suggestion_invoice(chat_id)
-            else:
-                keyboard = {
-                    "inline_keyboard": [
-                        [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
-                        [
-                            {"text": "🎁 نقاط اليوم", "callback_data": "claim_points"},
-                            {"text": "🏆 الصدارة", "callback_data": "show_leaderboard"},
-                        ],
-                        [{"text": "⭐ ادعم البوت", "callback_data": "show_donate"}],
-                        [{"text": "💡 اقترح إضافة", "callback_data": "propose_idea"}],
-                        [{"text": "🌐 موقع البوت", "url": get_site_url() or "https://t.me"}],
-                        [{"text": "❌ إلغاء الاشتراك", "callback_data": "unsubscribe"}],
-                    ]
-                }
-                send_message(
-                    chat_id,
-                    "أهلاً فيك في بوت زوجوني 💍\n"
-                    "اضغط الزر تحت إذا بدك تسجل حالك ضمن قائمة المستعدين للزواج 😄",
-                    keyboard,
-                )
+            keyboard = main_keyboard()
+            send_message(
+                chat_id,
+                "👋 أهلاً فيك في <b>بوت زوجوني</b> 💍\n\nاختر ما يناسبك:",
+                keyboard,
+            )
 
         elif text in ("/عدد", "/count"):
-            send_message(chat_id, f"عدد الأشخاص المسجلين لحد الآن: {get_count()} 💍")
-
-        elif text in ("/دعم", "/support", "/donate"):
-            send_message(
-                chat_id,
-                "بتقدر تدعم البوت بنجوم تيليجرام ⭐ اختر القيمة اللي بتناسبك:",
-                donation_keyboard(),
-            )
-
-        elif text in ("/احصائية_الدعم", "/donations"):
-            count, total = get_donations_stats()
-            send_message(
-                chat_id,
-                f"عدد عمليات الدعم: {count}\nإجمالي النجوم المستلمة: {total} ⭐️",
-            )
-
-        elif text in ("/اقترح", "/suggest"):
-            send_suggestion_invoice(chat_id)
-
-        elif text in ("/الاقتراحات", "/suggestions") and str(chat_id) == str(ADMIN_CHAT_ID):
-            send_message(chat_id, f"عدد الاقتراحات المستلمة: {get_suggestions_count()} 💡")
+            send_message(chat_id, f"<b>عدد المسجلين:</b> {get_count()} 💍")
 
         elif text in ("/نقاطي", "/points"):
-            send_message(chat_id, f"مجموع نقاطك: {get_user_points(user_id)} ⭐")
+            send_message(chat_id, f"<b>مجموع نقاطك:</b> {get_user_points(user_id)} ⭐")
 
         elif text in ("/الصدارة", "/leaderboard"):
             send_message(chat_id, build_leaderboard_text())
-
-        elif text in ("/الموقع", "/site", "/website"):
-            site_url = get_site_url()
-            if site_url:
-                send_message(
-                    chat_id,
-                    "🌐 تقدر تزور موقع البوت من هون:",
-                    {"inline_keyboard": [[{"text": "فتح الموقع", "url": site_url}]]},
-                )
-            else:
-                send_message(chat_id, "الموقع مش جاهز حالياً، حاول لاحقاً 🙏")
 
         elif text in ("/انسحب", "/unsubscribe"):
             if is_registered(user_id):
                 send_message(
                     chat_id,
-                    "متأكد بدك تنسحب من قائمة المسجلين للزواج؟",
-                    unsubscribe_confirm_keyboard(),
+                    "متأكد بدك تنسحب؟",
+                    {
+                        "inline_keyboard": [
+                            [{"text": "✅ نعم", "callback_data": "confirm_unsubscribe"}],
+                            [{"text": "🙅 لأ", "callback_data": "cancel_unsubscribe"}],
+                        ]
+                    },
                 )
             else:
-                send_message(chat_id, "أنت مش مسجل أصلاً بالقائمة 🙂")
+                send_message(chat_id, "أنت مش مسجل 🙂")
 
-    # ضغطة على الزر (Callback Query)
+    # ضغطة على زر
     elif "callback_query" in update:
         cq = update["callback_query"]
         sender = cq.get("from", {})
@@ -698,38 +570,12 @@ def webhook():
             if is_registered(user_id):
                 answer_callback(callback_id, "أنت مسجل مسبقاً 😄")
             else:
-                added = register_user(user_id)
-                if added:
-                    answer_callback(callback_id, "تم تسجيلك! مبروك مقدماً 🎉")
+                if register_user(user_id):
+                    answer_callback(callback_id, "✅ تم تسجيلك!")
                     send_message(
                         chat_id,
-                        f"تم تسجيلك بنجاح ✅\nعدد الراغبين بالزواج لحد الآن: {get_count()} 💍",
+                        f"🎉 تم تسجيلك بنجاح!\n<b>المسجلون الآن:</b> {get_count()} 💍",
                     )
-                else:
-                    answer_callback(callback_id, "حصل خطأ، جرب مرة ثانية 🙏")
-
-        elif data_key == "show_donate":
-            answer_callback(callback_id, "")
-            send_message(
-                chat_id,
-                "بتقدر تدعم البوت بنجوم تيليجرام ⭐ اختر القيمة اللي بتناسبك:",
-                donation_keyboard(),
-            )
-
-        elif data_key.startswith("donate_"):
-            try:
-                amount = int(data_key.split("_")[1])
-            except (IndexError, ValueError):
-                amount = 0
-            if amount in DONATION_AMOUNTS:
-                answer_callback(callback_id, f"جاري تجهيز فاتورة {amount} نجمة ⭐")
-                send_donation_invoice(chat_id, amount)
-            else:
-                answer_callback(callback_id, "قيمة غير صالحة 🙏")
-
-        elif data_key == "propose_idea":
-            answer_callback(callback_id, f"جاري تجهيز فاتورة {SUGGESTION_PRICE} نجمة ⭐")
-            send_suggestion_invoice(chat_id)
 
         elif data_key == "claim_points":
             success, total = claim_daily_points(user_id)
@@ -737,200 +583,433 @@ def webhook():
                 answer_callback(callback_id, f"🎁 +{DAILY_POINTS} نقطة!")
                 send_message(
                     chat_id,
-                    f"أخدت {DAILY_POINTS} نقطة اليوم 🎁\nمجموع نقاطك الآن: {total} ⭐\nرجعلنا بكرا تاخد نقاط كمان!",
+                    f"🎉 أخدت {DAILY_POINTS} نقطة اليوم!\n<b>مجموعك الآن:</b> {total} ⭐",
                 )
             else:
-                answer_callback(
-                    callback_id,
-                    "أخدت نقاط اليوم مسبقاً، رجعلنا بكرا 🙏",
-                    show_alert=True,
-                )
+                answer_callback(callback_id, "أخدت نقاطك اليوم مسبقاً 🙏", show_alert=True)
 
         elif data_key == "show_leaderboard":
             answer_callback(callback_id, "")
             send_message(chat_id, build_leaderboard_text())
 
         elif data_key == "unsubscribe":
-            answer_callback(callback_id, "")
             if is_registered(user_id):
                 send_message(
                     chat_id,
-                    "متأكد بدك تنسحب من قائمة المسجلين للزواج؟",
-                    unsubscribe_confirm_keyboard(),
+                    "متأكد؟",
+                    {
+                        "inline_keyboard": [
+                            [{"text": "✅ نعم", "callback_data": "confirm_unsubscribe"}],
+                            [{"text": "🙅 لأ", "callback_data": "cancel_unsubscribe"}],
+                        ]
+                    },
                 )
-            else:
-                send_message(chat_id, "أنت مش مسجل أصلاً بالقائمة 🙂")
 
         elif data_key == "confirm_unsubscribe":
-            removed = unregister_user(user_id)
-            if removed:
-                answer_callback(callback_id, "تم الانسحاب ✅")
-                send_message(
-                    chat_id,
-                    f"تم حذفك من قائمة المسجلين 👋\nعدد الراغبين بالزواج الآن: {get_count()} 💍",
-                )
-            else:
-                answer_callback(callback_id, "ما كنت مسجل أصلاً 🙂")
+            if unregister_user(user_id):
+                answer_callback(callback_id, "✅ تم الانسحاب")
+                send_message(chat_id, f"👋 تم حذفك\n<b>المسجلون الآن:</b> {get_count()} 💍")
 
         elif data_key == "cancel_unsubscribe":
-            answer_callback(callback_id, "تم التراجع 👍")
+            answer_callback(callback_id, "👍 تم التراجع")
 
     return jsonify({"ok": True})
 
 
-# ───────────────────────── الموقع البسيط (صفحة تعريفية + إحصائيات حية) ─────────────────────────
-SITE_TEMPLATE = """<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>بوت زوجوني 💍</title>
-<style>
-  :root {{
-    --pink: #ff5a8a;
-    --purple: #7b3fe4;
-    --bg: #0f0a1e;
-    --card: rgba(255,255,255,0.06);
-  }}
-  * {{ box-sizing: border-box; }}
-  body {{
-    margin: 0;
-    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
-    background: radial-gradient(circle at top, #241a3d 0%, var(--bg) 70%);
-    color: #fff;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 40px 16px;
-  }}
-  .logo {{ font-size: 56px; margin-bottom: 8px; }}
-  h1 {{
-    font-size: 28px;
-    margin: 0 0 6px;
-    background: linear-gradient(90deg, var(--pink), var(--purple));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-  }}
-  p.subtitle {{ color: #cfc7e6; margin: 0 0 32px; text-align: center; max-width: 420px; }}
-  .stats {{
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
-    width: 100%;
-    max-width: 480px;
-    margin-bottom: 32px;
-  }}
-  .stat {{
-    background: var(--card);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 16px;
-    padding: 18px 10px;
-    text-align: center;
-  }}
-  .stat .num {{ font-size: 22px; font-weight: bold; color: var(--pink); }}
-  .stat .label {{ font-size: 12px; color: #cfc7e6; margin-top: 4px; }}
-  .card {{
-    background: var(--card);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 20px;
-    padding: 22px;
-    width: 100%;
-    max-width: 480px;
-    margin-bottom: 20px;
-  }}
-  .card h2 {{ font-size: 16px; margin: 0 0 14px; color: #fff; }}
-  .row {{
-    display: flex;
-    justify-content: space-between;
-    padding: 8px 0;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
-    font-size: 14px;
-  }}
-  .row:last-child {{ border-bottom: none; }}
-  .btn {{
-    display: inline-block;
-    margin-top: 8px;
-    background: linear-gradient(90deg, var(--pink), var(--purple));
-    color: #fff;
-    text-decoration: none;
-    padding: 14px 32px;
-    border-radius: 30px;
-    font-weight: bold;
-    font-size: 15px;
-  }}
-  footer {{ margin-top: 20px; font-size: 12px; color: #7a7295; }}
-</style>
-</head>
-<body>
-  <div class="logo">💍</div>
-  <h1>بوت زوجوني</h1>
-  <p class="subtitle">منصّة بسيطة على تيليجرام لتسجيل الراغبين بالزواج، بالإضافة لنظام نقاط يومي ولوحة صدارة.</p>
-
-  <div class="stats">
-    <div class="stat"><div class="num">{registered_count}</div><div class="label">مسجّل 💍</div></div>
-    <div class="stat"><div class="num">{donations_total}</div><div class="label">نجمة دعم ⭐</div></div>
-    <div class="stat"><div class="num">{suggestions_count}</div><div class="label">اقتراح 💡</div></div>
-  </div>
-
-  <div class="card">
-    <h2>🏆 لائحة الصدارة</h2>
-    {leaderboard_rows}
-  </div>
-
-  <a class="btn" href="{bot_link}" target="_blank">فتح البوت على تيليجرام</a>
-  <footer>بوت زوجوني — {year}</footer>
-</body>
-</html>"""
+# ───────────────────────── API للموقع الويب ─────────────────────────
+@app.route("/api/user/info", methods=["POST"])
+def api_user_info():
+    """الحصول على معلومات المستخدم من البوت"""
+    data = request.get_json() or {}
+    user_id = data.get("user_id")
+    
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    
+    try:
+        return jsonify({
+            "user_id": user_id,
+            "is_registered": is_registered(user_id),
+            "points": get_user_points(user_id),
+            "donation_count": get_donations_stats()[0],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    """تسجيل المستخدم من الموقع"""
+    data = request.get_json() or {}
+    user_id = data.get("user_id")
+    
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    
+    try:
+        result = register_user(user_id)
+        return jsonify({
+            "success": result,
+            "message": "تم التسجيل بنجاح 🎉" if result else "أنت مسجل مسبقاً"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/donate", methods=["POST"])
+def api_donate():
+    """معالجة الدفع من الموقع"""
+    data = request.get_json() or {}
+    user_id = data.get("user_id")
+    amount = data.get("amount")
+    charge_id = data.get("charge_id", "web_" + str(datetime.now().timestamp()))
+    
+    if not user_id or not amount:
+        return jsonify({"error": "user_id and amount required"}), 400
+    
+    try:
+        record_donation(user_id, amount, charge_id)
+        return jsonify({
+            "success": True,
+            "message": f"شكراً لدعمك 💛 {amount} نجمة ⭐️"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    """احصائيات عامة"""
+    try:
+        count, total = get_donations_stats()
+        return jsonify({
+            "registered": get_count(),
+            "donations_count": count,
+            "donations_total": total,
+            "suggestions": get_suggestions_count(),
+            "leaderboard": get_leaderboard(10),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/claim-points", methods=["POST"])
+def api_claim_points():
+    """مطالبة النقاط من الموقع"""
+    data = request.get_json() or {}
+    user_id = data.get("user_id")
+    
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    
+    try:
+        success, total = claim_daily_points(user_id)
+        return jsonify({
+            "success": success,
+            "points": total,
+            "message": f"+{DAILY_POINTS} نقطة!" if success else "أخدت نقاطك اليوم مسبقاً"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ───────────────────────── الموقع الويب (HTML) ─────────────────────────
 @app.route("/")
 def site_home():
-    from datetime import datetime
+    """الصفحة الرئيسية"""
+    site_url = get_site_url()
+    return """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>بوت زوجوني 💍</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+            background: linear-gradient(135deg, #1e1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 12px;
+        }
+        .container { max-width: 500px; margin: 0 auto; }
+        .header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 2px solid rgba(255,255,255,0.1);
+            margin-bottom: 20px;
+        }
+        .logo { font-size: 48px; margin: 0; }
+        h1 {
+            font-size: 24px;
+            margin: 8px 0 0;
+            background: linear-gradient(90deg, #ff5a8a, #7b3fe4);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .tabs {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .tab-btn {
+            padding: 12px;
+            background: rgba(255,255,255,0.06);
+            border: 2px solid rgba(255,255,255,0.1);
+            color: #fff;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .tab-btn.active {
+            background: linear-gradient(90deg, #ff5a8a, #7b3fe4);
+            border-color: #ff5a8a;
+        }
+        .tab-content {
+            display: none;
+            animation: slideIn 0.3s ease;
+        }
+        .tab-content.active { display: block; }
+        @keyframes slideIn { from { opacity: 0; } to { opacity: 1; } }
+        
+        .card {
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 18px;
+            margin-bottom: 15px;
+        }
+        .stat { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .stat:last-child { border-bottom: none; }
+        .stat-label { color: #a0a0b0; font-size: 14px; }
+        .stat-value { font-weight: bold; color: #ff5a8a; }
+        
+        .btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(90deg, #ff5a8a, #7b3fe4);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 15px;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin-bottom: 10px;
+        }
+        .btn:active { transform: scale(0.98); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .amount-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .amount-btn {
+            padding: 12px;
+            background: rgba(255,255,255,0.06);
+            border: 2px solid rgba(255,255,255,0.1);
+            color: #fff;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .amount-btn.selected {
+            background: #ff5a8a;
+            border-color: #ff5a8a;
+        }
+        
+        .leaderboard { list-style: none; padding: 0; margin: 0; }
+        .lb-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+            margin-bottom: 8px;
+        }
+        .lb-rank { font-size: 20px; margin-right: 12px; }
+        .lb-info { flex: 1; }
+        .lb-name { font-weight: bold; }
+        .lb-points { color: #ff5a8a; font-weight: bold; }
+        
+        .loading { text-align: center; padding: 20px; color: #a0a0b0; }
+        .message {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            text-align: center;
+            animation: slideIn 0.3s ease;
+        }
+        .message.success { background: rgba(76, 175, 80, 0.2); color: #4caf50; }
+        .message.error { background: rgba(244, 67, 54, 0.2); color: #f44336; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">💍</div>
+            <h1>بوت زوجوني</h1>
+        </div>
 
-    registered_count = get_count()
-    _, donations_total = get_donations_stats()
-    suggestions_count = get_suggestions_count()
-    top = get_leaderboard(10)
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('home')">🏠 الرئيسية</button>
+            <button class="tab-btn" onclick="switchTab('leaderboard')">🏆 الصدارة</button>
+            <button class="tab-btn" onclick="switchTab('donate')">⭐ ادعم</button>
+            <button class="tab-btn" onclick="switchTab('profile')">👤 ملفي</button>
+        </div>
 
-    if top:
-        medals = ["🥇", "🥈", "🥉"]
-        rows_html = ""
-        for i, u in enumerate(top):
-            icon = medals[i] if i < len(medals) else f"{i + 1}."
-            rows_html += (
-                f'<div class="row"><span>{icon} {mask_name(u["name"])}</span>'
-                f'<span>{u["points"]} نقطة</span></div>'
-            )
-    else:
-        rows_html = '<div class="row"><span>لسا محدا كسب نقاط 🙂</span></div>'
+        <div id="home" class="tab-content active">
+            <div class="card">
+                <div id="homeStats">جاري التحميل...</div>
+            </div>
+            <button class="btn" onclick="registerUser()">✅ بدي أتزوج</button>
+            <button class="btn" onclick="claimPoints()">🎁 خد نقاطك اليوم</button>
+        </div>
 
-    bot_link = "https://t.me"
-    try:
-        me = requests.get(f"{TELEGRAM_API}/getMe", timeout=5).json()
-        username = me.get("result", {}).get("username")
-        if username:
-            bot_link = f"https://t.me/{username}"
-    except Exception as e:
-        print(f"getMe error: {e}")
+        <div id="leaderboard" class="tab-content">
+            <div class="card">
+                <ul class="leaderboard" id="leaderboardList">
+                    <div class="loading">جاري التحميل...</div>
+                </ul>
+            </div>
+        </div>
 
-    html = SITE_TEMPLATE.format(
-        registered_count=registered_count,
-        donations_total=donations_total,
-        suggestions_count=suggestions_count,
-        leaderboard_rows=rows_html,
-        bot_link=bot_link,
-        year=datetime.now().year,
-    )
-    return html
+        <div id="donate" class="tab-content">
+            <div class="card">
+                <h3 style="margin: 0 0 15px; text-align: center;">اختر المبلغ</h3>
+                <div class="amount-grid">
+                    <button class="amount-btn" onclick="selectAmount(100)">100 ⭐</button>
+                    <button class="amount-btn" onclick="selectAmount(200)">200 ⭐</button>
+                    <button class="amount-btn" onclick="selectAmount(500)">500 ⭐</button>
+                    <button class="amount-btn" onclick="selectAmount(1000)">1000 ⭐</button>
+                </div>
+            </div>
+            <button class="btn" id="donateBtn" onclick="sendDonation()" disabled>إرسال الدفع</button>
+        </div>
+
+        <div id="profile" class="tab-content">
+            <div class="card">
+                <div id="profileStats">جاري التحميل...</div>
+            </div>
+        </div>
+
+        <div id="messages"></div>
+    </div>
+
+    <script>
+        let tg = window.Telegram.WebApp;
+        let selectedAmount = null;
+        let user = tg.initData ? JSON.parse(decodeURIComponent(tg.initData)) : { user: { id: 0 } };
+        let userId = user.user?.id || 0;
+
+        tg.ready();
+        tg.expand();
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            
+            document.getElementById(tab).classList.add('active');
+            event.target.classList.add('active');
+            
+            if (tab === 'leaderboard') loadLeaderboard();
+            if (tab === 'profile') loadProfile();
+            if (tab === 'home') loadHome();
+        }
+
+        function loadHome() {
+            fetch('/api/stats').then(r => r.json()).then(data => {
+                document.getElementById('homeStats').innerHTML = `
+                    <div class="stat"><span class="stat-label">المسجلون</span><span class="stat-value">${data.registered} 💍</span></div>
+                    <div class="stat"><span class="stat-label">نجوم الدعم</span><span class="stat-value">${data.donations_total} ⭐</span></div>
+                    <div class="stat"><span class="stat-label">الاقتراحات</span><span class="stat-value">${data.suggestions} 💡</span></div>
+                `;
+            });
+        }
+
+        function loadLeaderboard() {
+            fetch('/api/stats').then(r => r.json()).then(data => {
+                let html = '';
+                let medals = ['🥇', '🥈', '🥉'];
+                data.leaderboard.forEach((item, i) => {
+                    html += `
+                        <li class="lb-item">
+                            <span class="lb-rank">${medals[i] || i + 1}</span>
+                            <div class="lb-info">
+                                <div class="lb-name">${item.name}</div>
+                                <div class="lb-points">${item.points} نقطة</div>
+                            </div>
+                        </li>
+                    `;
+                });
+                document.getElementById('leaderboardList').innerHTML = html || '<div class="loading">لا توجد بيانات</div>';
+            });
+        }
+
+        function loadProfile() {
+            fetch('/api/user/info', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
+                .then(r => r.json()).then(data => {
+                    document.getElementById('profileStats').innerHTML = `
+                        <div class="stat"><span class="stat-label">ID</span><span class="stat-value">${data.user_id}</span></div>
+                        <div class="stat"><span class="stat-label">الحالة</span><span class="stat-value">${data.is_registered ? '✅ مسجل' : '❌ غير مسجل'}</span></div>
+                        <div class="stat"><span class="stat-label">النقاط</span><span class="stat-value">${data.points} ⭐</span></div>
+                    `;
+                });
+        }
+
+        function registerUser() {
+            fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
+                .then(r => r.json()).then(data => showMessage(data.message, data.success ? 'success' : 'error'));
+        }
+
+        function claimPoints() {
+            fetch('/api/claim-points', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
+                .then(r => r.json()).then(data => showMessage(data.message, data.success ? 'success' : 'error'));
+        }
+
+        function selectAmount(amount) {
+            selectedAmount = amount;
+            document.querySelectorAll('.amount-btn').forEach(btn => btn.classList.remove('selected'));
+            event.target.classList.add('selected');
+            document.getElementById('donateBtn').disabled = false;
+        }
+
+        function sendDonation() {
+            if (!selectedAmount) return;
+            fetch('/api/donate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, amount: selectedAmount }) })
+                .then(r => r.json()).then(data => showMessage(data.message, data.success ? 'success' : 'error'));
+        }
+
+        function showMessage(text, type) {
+            let msg = document.createElement('div');
+            msg.className = `message ${type}`;
+            msg.textContent = text;
+            document.getElementById('messages').appendChild(msg);
+            setTimeout(() => msg.remove(), 3000);
+        }
+
+        loadHome();
+    </script>
+</body>
+</html>
+    """
 
 
-# ───────────────────────── تفعيل الويب هوك تلقائياً ─────────────────────────
+# ───────────────────────── تفعيل الويب هوك ─────────────────────────
 def set_webhook():
     domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     if not domain or not BOT_TOKEN:
-        print("BOT_TOKEN أو RAILWAY_PUBLIC_DOMAIN غير موجودين، لن يتم ضبط الويب هوك تلقائياً.")
+        print("⚠️ RAILWAY_PUBLIC_DOMAIN أو BOT_TOKEN غير موجودين")
         return
     url = f"https://{domain}/webhook/{BOT_TOKEN}"
     try:
@@ -938,21 +1017,18 @@ def set_webhook():
             f"{TELEGRAM_API}/setWebhook",
             params={
                 "url": url,
-                "allowed_updates": json.dumps(
-                    ["message", "callback_query", "pre_checkout_query"]
-                ),
+                "allowed_updates": json.dumps(["message", "callback_query", "pre_checkout_query"]),
             },
             timeout=10,
         )
-        print(f"Webhook set to: {url} -> {r.json()}")
+        print(f"✅ Webhook: {url}")
     except Exception as e:
-        print(f"فشل ضبط الويب هوك: {e}")
+        print(f"❌ Webhook error: {e}")
 
 
-# يُنفَّذ عند استيراد الملف (يعمل مع gunicorn والتشغيل المباشر على حد سواء)
+# تهيئة
 init_db()
 set_webhook()
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
