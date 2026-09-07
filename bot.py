@@ -608,12 +608,17 @@ def send_invoice(chat_id, amount, title, description, payload_str):
     if not chat_id or amount <= 0:
         return False
     try:
+        provider_token = os.environ.get("STRIPE_PROVIDER_TOKEN", "")
+        if not provider_token:
+            print("❌ STRIPE_PROVIDER_TOKEN غير موجود")
+            return False
+            
         payload = {
             "chat_id": int(chat_id),
             "title": title[:32],
             "description": description[:255],
             "payload": payload_str[:128],
-            "provider_token": os.environ.get("STRIPE_PROVIDER_TOKEN", ""),
+            "provider_token": provider_token,
             "currency": "XTR",
             "prices": [{"label": title[:32], "amount": int(amount)}],
             "start_parameter": payload_str[:64],
@@ -621,13 +626,21 @@ def send_invoice(chat_id, amount, title, description, payload_str):
         r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=REQUEST_TIMEOUT)
         result = r.json()
         success = result.get('ok', False)
+        
         if not success:
-            print(f"Invoice error: {result.get('description', 'unknown')}")
-            send_message(chat_id, f"⚠️ خطأ: {result.get('description', 'حاول لاحقاً')[:100]}")
+            error_desc = result.get('description', 'unknown error')
+            print(f"❌ Invoice error for user {chat_id}: {error_desc}")
+            send_message(chat_id, f"⚠️ خطأ فاتورة: {error_desc[:80]}")
+        else:
+            print(f"✅ Invoice sent to {chat_id}: {amount}⭐")
+            
         return success
     except Exception as e:
-        print(f"send_invoice exception: {e}")
-        send_message(chat_id, f"❌ خطأ اتصال")
+        print(f"❌ send_invoice exception: {e}")
+        try:
+            send_message(chat_id, "❌ خطأ في إرسال الفاتورة")
+        except:
+            pass
         return False
 
 
@@ -937,7 +950,7 @@ def api_claim_points():
 
 @app.route("/api/send-invoice", methods=["POST"])
 def api_send_invoice():
-    """إرسال فاتورة من الموقع"""
+    """إرسال فاتورة مباشرة للمستخدم في البوت من الويب"""
     data = request.get_json() or {}
     user_id = data.get("user_id")
     amount = data.get("amount")
@@ -949,16 +962,19 @@ def api_send_invoice():
         return jsonify({"error": "invalid_amount"}), 400
     
     try:
-        success = send_invoice(user_id, amount, f"دعم {amount}⭐", "شكراً!", f"donate_{amount}")
+        # إرسال الفاتورة مباشرة للمستخدم في البوت
+        success = send_invoice(user_id, amount, f"دعم {amount}⭐", "شكراً لدعمك! 💛", f"donate_{amount}")
         if success:
             return jsonify({
                 "success": True,
-                "message": f"✅ فاتورة {amount}⭐"
+                "message": f"✅ تم إرسال فاتورة {amount}⭐ للبوت",
+                "user_id": user_id,
+                "amount": amount
             })
         else:
             return jsonify({
                 "success": False,
-                "message": "❌ فشل"
+                "message": "❌ فشل إرسال الفاتورة"
             }), 500
     except Exception as e:
         print(f"api_send_invoice error: {e}")
@@ -1046,11 +1062,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div style="text-align: center; margin-bottom: 15px;">
                     <div style="font-size: 14px; margin-bottom: 10px;">⭐ اختر المبلغ</div>
                     <div class="amount-grid">
-                        <button class="amount-btn" onclick="sendDonation(100)">100 ⭐</button>
-                        <button class="amount-btn" onclick="sendDonation(200)">200 ⭐</button>
-                        <button class="amount-btn" onclick="sendDonation(500)">500 ⭐</button>
-                        <button class="amount-btn" onclick="sendDonation(1000)">1000 ⭐</button>
+                        <button class="amount-btn" onclick="sendDonation(100)" style="cursor: pointer;">💛 100</button>
+                        <button class="amount-btn" onclick="sendDonation(200)" style="cursor: pointer;">💛 200</button>
+                        <button class="amount-btn" onclick="sendDonation(500)" style="cursor: pointer;">💛 500</button>
+                        <button class="amount-btn" onclick="sendDonation(1000)" style="cursor: pointer;">💛 1000</button>
                     </div>
+                    <div style="font-size: 12px; color: #a0a0b0; margin-top: 12px;">الفاتورة ستظهر في البوت مباشرة</div>
                 </div>
             </div>
         </div>
@@ -1146,11 +1163,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         function sendDonation(amount) {
-            fetch('/api/send-invoice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, amount: amount }) })
-                .then(r => r.json()).then(d => {
-                    showMsg(d.message || d.error, d.success ? 'success' : 'error');
-                    statsCache = null;
-                }).catch(e => showMsg('خطأ اتصال', 'error'));
+            let btn = event.target;
+            btn.disabled = true;
+            btn.style.opacity = '0.5';
+            
+            fetch('/api/send-invoice', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ user_id: userId, amount: amount }) 
+            })
+            .then(r => r.json())
+            .then(d => {
+                showMsg(d.message || d.error, d.success ? 'success' : 'error');
+                if (d.success) {
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.style.opacity = '1';
+                        statsCache = null;
+                    }, 2000);
+                } else {
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                }
+            })
+            .catch(e => {
+                showMsg('❌ خطأ: ' + e.message, 'error');
+                btn.disabled = false;
+                btn.style.opacity = '1';
+            });
         }
 
         function showMsg(text, type) {
