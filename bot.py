@@ -767,6 +767,12 @@ def webhook():
 
         elif data_key == "cancel_unsubscribe":
             answer_callback(callback_id, "👍 تم التراجع")
+        
+        # ✅ معالج الدعم المباشر (donate_100, donate_200, إلخ)
+        elif data_key.startswith("donate_"):
+            amount = int(data_key.replace("donate_", ""))
+            send_invoice(chat_id, amount, f"دعم بـ {amount} نجمة", f"شكراً لدعمك!", f"donate_{amount}")
+            answer_callback(callback_id, "جاري إرسال الفاتورة...")
 
     return jsonify({"ok": True})
 
@@ -869,6 +875,36 @@ def api_claim_points():
             "success": success,
             "points": total,
             "message": f"+{DAILY_POINTS} نقطة!" if success else "أخدت نقاطك اليوم مسبقاً"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/send-invoice", methods=["POST"])
+def api_send_invoice():
+    """إرسال فاتورة مباشرة من الموقع"""
+    data = request.get_json() or {}
+    user_id = data.get("user_id")
+    amount = data.get("amount")
+    
+    if not user_id or not amount:
+        return jsonify({"error": "user_id and amount required"}), 400
+    
+    if amount not in DONATION_AMOUNTS:
+        return jsonify({"error": "invalid amount"}), 400
+    
+    try:
+        # إرسال الفاتورة للمستخدم في البوت
+        send_invoice(
+            user_id,
+            amount,
+            f"دعم بـ {amount} نجمة",
+            f"شكراً لدعمك! 💛",
+            f"donate_{amount}"
+        )
+        return jsonify({
+            "success": True,
+            "message": f"تم إرسال فاتورة الدفع {amount} نجمة إلى البوت ⭐"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1043,15 +1079,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <div id="donate" class="tab-content">
             <div class="card">
-                <h3 style="margin: 0 0 15px; text-align: center;">اختر المبلغ</h3>
+                <h3 style="margin: 0 0 15px; text-align: center;">⭐ اختر المبلغ</h3>
+                <p style="text-align: center; color: #a0a0b0; font-size: 13px; margin: 0 0 15px;">الدفع يتم مباشرة عند الاختيار</p>
                 <div class="amount-grid">
-                    <button class="amount-btn" onclick="selectAmount(100)">100 ⭐</button>
-                    <button class="amount-btn" onclick="selectAmount(200)">200 ⭐</button>
-                    <button class="amount-btn" onclick="selectAmount(500)">500 ⭐</button>
-                    <button class="amount-btn" onclick="selectAmount(1000)">1000 ⭐</button>
+                    <button class="amount-btn" onclick="sendDonationDirect(100)">💛 100 ⭐</button>
+                    <button class="amount-btn" onclick="sendDonationDirect(200)">💛 200 ⭐</button>
+                    <button class="amount-btn" onclick="sendDonationDirect(500)">💛 500 ⭐</button>
+                    <button class="amount-btn" onclick="sendDonationDirect(1000)">💛 1000 ⭐</button>
                 </div>
             </div>
-            <button class="btn" id="donateBtn" onclick="sendDonation()" disabled>إرسال الدفع</button>
+            <div style="text-align: center; color: #a0a0b0; font-size: 12px; padding: 10px;">
+                💳 يتم التحويل إلى التطبيق لإكمال الدفع
+            </div>
         </div>
 
         <div id="profile" class="tab-content">
@@ -1159,20 +1198,40 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 });
         }
 
-        function selectAmount(amount) {
-            selectedAmount = amount;
-            document.querySelectorAll('.amount-btn').forEach(btn => btn.classList.remove('selected'));
-            event.target.classList.add('selected');
-            document.getElementById('donateBtn').disabled = false;
-        }
+        function sendDonationDirect(amount) {
+            // ✅ إرسال الفاتورة مباشرة عند اختيار المبلغ
+            const button = event.target.closest('.amount-btn');
+            button.disabled = true;
+            button.textContent = '⏳ جاري...';
 
-        function sendDonation() {
-            if (!selectedAmount) return;
-            fetch('/api/donate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, amount: selectedAmount }) })
-                .then(r => r.json()).then(data => {
-                    showMessage(data.message, data.success ? 'success' : 'error');
-                    statsCache = null;
-                });
+            // إرسال الفاتورة للبوت
+            fetch('/api/send-invoice', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ user_id: userId, amount: amount })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage(data.message, 'success');
+                    
+                    // تحديث البيانات بعد إرسال الفاتورة
+                    setTimeout(() => {
+                        loadHome();
+                        button.disabled = false;
+                        button.textContent = '💛 ' + amount + ' ⭐';
+                    }, 1500);
+                } else {
+                    showMessage(data.message || 'حدث خطأ', 'error');
+                    button.disabled = false;
+                    button.textContent = '💛 ' + amount + ' ⭐';
+                }
+            })
+            .catch(err => {
+                showMessage('خطأ: ' + err.message, 'error');
+                button.disabled = false;
+                button.textContent = '💛 ' + amount + ' ⭐';
+            });
         }
 
         function showMessage(text, type) {
