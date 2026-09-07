@@ -545,15 +545,23 @@ def send_invoice(chat_id, amount, title, description, payload_str):
         "title": title,
         "description": description,
         "payload": payload_str,
-        "provider_token": "",
+        "provider_token": os.environ.get("STRIPE_PROVIDER_TOKEN", ""),
         "currency": "XTR",
         "prices": [{"label": title, "amount": amount}],
+        "start_parameter": payload_str,
     }
     try:
-        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=5)
-        print(f"send_invoice({payload_str}) -> {r.json()}")
+        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=10)
+        result = r.json()
+        print(f"✅ Invoice sent ({payload_str}): {result.get('ok', False)}")
+        if not result.get('ok'):
+            print(f"⚠️ Invoice error: {result.get('description', 'unknown')}")
+            send_message(chat_id, f"⚠️ خطأ في إرسال الفاتورة: {result.get('description', 'حاول لاحقاً')}")
+        return result.get('ok', False)
     except Exception as e:
-        print(f"send_invoice error: {e}")
+        print(f"❌ send_invoice exception: {e}")
+        send_message(chat_id, f"❌ خطأ في الاتصال: {str(e)}")
+        return False
 
 
 def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
@@ -770,9 +778,16 @@ def webhook():
         
         # ✅ معالج الدعم المباشر (donate_100, donate_200, إلخ)
         elif data_key.startswith("donate_"):
-            amount = int(data_key.replace("donate_", ""))
-            send_invoice(chat_id, amount, f"دعم بـ {amount} نجمة", f"شكراً لدعمك!", f"donate_{amount}")
-            answer_callback(callback_id, "جاري إرسال الفاتورة...")
+            try:
+                amount = int(data_key.replace("donate_", ""))
+                success = send_invoice(chat_id, amount, f"دعم بـ {amount} نجمة", f"شكراً لدعمك! 💛", f"donate_{amount}")
+                if success:
+                    answer_callback(callback_id, "✅ تم إرسال الفاتورة!")
+                else:
+                    answer_callback(callback_id, "❌ خطأ في الفاتورة", show_alert=True)
+            except Exception as e:
+                print(f"donate error: {e}")
+                answer_callback(callback_id, "❌ خطأ", show_alert=True)
 
     return jsonify({"ok": True})
 
@@ -838,6 +853,19 @@ def api_donate():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/test-invoice/<int:user_id>/<int:amount>", methods=["GET"])
+def api_test_invoice(user_id, amount):
+    """اختبار إرسال فاتورة (للتطوير فقط)"""
+    if amount not in DONATION_AMOUNTS:
+        return jsonify({"error": f"invalid amount"}), 400
+    
+    try:
+        success = send_invoice(user_id, amount, f"اختبار {amount}", "اختبار", f"test_{amount}")
+        return jsonify({"success": success, "user_id": user_id, "amount": amount})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
     """احصائيات عامة (محسّن)"""
@@ -891,22 +919,29 @@ def api_send_invoice():
         return jsonify({"error": "user_id and amount required"}), 400
     
     if amount not in DONATION_AMOUNTS:
-        return jsonify({"error": "invalid amount"}), 400
+        return jsonify({"error": f"invalid amount. allowed: {DONATION_AMOUNTS}"}), 400
     
     try:
         # إرسال الفاتورة للمستخدم في البوت
-        send_invoice(
+        success = send_invoice(
             user_id,
             amount,
             f"دعم بـ {amount} نجمة",
             f"شكراً لدعمك! 💛",
             f"donate_{amount}"
         )
-        return jsonify({
-            "success": True,
-            "message": f"تم إرسال فاتورة الدفع {amount} نجمة إلى البوت ⭐"
-        })
+        if success:
+            return jsonify({
+                "success": True,
+                "message": f"✅ تم إرسال فاتورة الدفع {amount} نجمة للبوت ⭐"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "❌ فشل إرسال الفاتورة. حاول لاحقاً"
+            }), 500
     except Exception as e:
+        print(f"api_send_invoice error: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1199,36 +1234,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         function sendDonationDirect(amount) {
-            // ✅ إرسال الفاتورة مباشرة عند اختيار المبلغ
             const button = event.target.closest('.amount-btn');
             button.disabled = true;
             button.textContent = '⏳ جاري...';
 
-            // إرسال الفاتورة للبوت
+            console.log('Sending invoice for user:', userId, 'amount:', amount);
+
             fetch('/api/send-invoice', { 
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' }, 
                 body: JSON.stringify({ user_id: userId, amount: amount })
             })
-            .then(r => r.json())
+            .then(r => {
+                console.log('Response status:', r.status);
+                return r.json();
+            })
             .then(data => {
+                console.log('Response data:', data);
                 if (data.success) {
-                    showMessage(data.message, 'success');
-                    
-                    // تحديث البيانات بعد إرسال الفاتورة
+                    showMessage('✅ ' + data.message, 'success');
                     setTimeout(() => {
                         loadHome();
                         button.disabled = false;
                         button.textContent = '💛 ' + amount + ' ⭐';
-                    }, 1500);
+                    }, 2000);
                 } else {
-                    showMessage(data.message || 'حدث خطأ', 'error');
+                    showMessage('❌ ' + (data.message || data.error || 'خطأ غير معروف'), 'error');
                     button.disabled = false;
                     button.textContent = '💛 ' + amount + ' ⭐';
                 }
             })
             .catch(err => {
-                showMessage('خطأ: ' + err.message, 'error');
+                console.error('Error:', err);
+                showMessage('❌ خطأ: ' + err.message, 'error');
                 button.disabled = false;
                 button.textContent = '💛 ' + amount + ' ⭐';
             });
