@@ -18,7 +18,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
-STRIPE_TOKEN = os.environ.get("STRIPE_PROVIDER_TOKEN", "")
 
 DONATION_AMOUNTS = [100, 200, 500, 1000]
 DAILY_POINTS = 100
@@ -625,9 +624,6 @@ def api_create_payment():
         if amount not in DONATION_AMOUNTS:
             return jsonify({"error": "invalid_amount"}), 400
         
-        if not STRIPE_TOKEN:
-            return jsonify({"error": "payment_unavailable"}), 503
-        
         charge_id = f"web_{user_id}_{int(time.time())}_{amount}"
         
         return jsonify({
@@ -919,42 +915,35 @@ def site_home():
                         title: createResp.title,
                         description: createResp.description,
                         payload: createResp.charge_id,
-                        provider_token: "",
-                        start_parameter: "",
-                        photo_url: "",
-                        photo_size: 0,
-                        photo_width: 0,
-                        photo_height: 0,
-                        need_name: false,
-                        need_phone_number: false,
-                        need_email: false,
-                        need_shipping_address: false,
-                        send_phone_number_to_provider: false,
-                        send_email_to_provider: false,
-                        is_flexible: false
+                        provider_token: "368176:TEST",
+                        start_parameter: createResp.charge_id
                     }, (status) => {
                         if (status === "paid" || status === "success") {
                             completePayment(userId, amount, createResp.charge_id, btn);
                         } else if (status === "failed") {
                             showMsg('❌ فشل الدفع', 'error');
-                            btn.disabled = false;
-                            btn.textContent = '💛 ' + amount;
+                            resetBtn(btn, amount);
                         } else if (status === "cancelled") {
                             showMsg('❌ تم إلغاء العملية', 'error');
-                            btn.disabled = false;
-                            btn.textContent = '💛 ' + amount;
+                            resetBtn(btn, amount);
+                        } else {
+                            showMsg('❌ حالة غير معروفة: ' + status, 'error');
+                            resetBtn(btn, amount);
                         }
                     });
                 } else {
-                    showMsg('❌ الدفع غير متاح في هذه البيئة', 'error');
-                    btn.disabled = false;
-                    btn.textContent = '💛 ' + amount;
+                    showMsg('❌ الدفع غير متاح - استخدم التطبيق', 'error');
+                    resetBtn(btn, amount);
                 }
             } catch (e) {
                 showMsg('❌ خطأ: ' + (e.message || 'unknown'), 'error');
-                btn.disabled = false;
-                btn.textContent = '💛 ' + amount;
+                resetBtn(btn, amount);
             }
+        }
+
+        function resetBtn(btn, amount) {
+            btn.disabled = false;
+            btn.textContent = '💛 ' + amount;
         }
 
         async function completePayment(userId, amount, chargeId, btn) {
@@ -968,19 +957,21 @@ def site_home():
                 });
 
                 if (completeResp.success) {
-                    showMsg('💛 ' + completeResp.message, 'success');
+                    showMsg('💛 شكراً لك! تم استقبال ' + amount + ' نجمة', 'success');
                     statsCache = null;
+                    resetBtn(btn, amount);
                     setTimeout(() => loadHome(), 1500);
                 } else {
-                    showMsg('⚠️ ' + (completeResp.message || 'خطأ غير معروف'), 'error');
+                    showMsg('⚠️ ' + (completeResp.message || 'خطأ في التسجيل'), 'error');
+                    resetBtn(btn, amount);
                 }
             } catch (e) {
-                showMsg('❌ خطأ في التأكيد: ' + (e.message || 'unknown'), 'error');
-            } finally {
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = '💛 ' + amount;
+                if (e.message === 'payment_duplicate') {
+                    showMsg('✅ هذه العملية مسجلة مسبقاً', 'success');
+                } else {
+                    showMsg('❌ خطأ: ' + (e.message || 'unknown'), 'error');
                 }
+                resetBtn(btn, amount);
             }
         }
 
