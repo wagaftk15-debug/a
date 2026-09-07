@@ -2,8 +2,13 @@ import os
 import json
 import requests
 import psycopg2
-from flask import Flask, request, jsonify
-from datetime import datetime
+from psycopg2 import pool
+from flask import Flask, request, jsonify, make_response
+from datetime import datetime, timedelta
+from threading import Lock
+import hashlib
+import gzip
+from io import BytesIO
 
 app = Flask(__name__)
 
@@ -18,14 +23,89 @@ DONATION_AMOUNTS = [100, 200, 500, 1000]
 SUGGESTION_PRICE = 1
 DAILY_POINTS = 100
 
+# ✅ Connection Pool (حل مشكلة الاتصالات المتكررة)
+db_pool = None
 
-# ───────────────────────── تخزين البيانات (PostgreSQL) ─────────────────────────
+# ✅ Cache في الذاكرة مع timestamps
+cache = {}
+cache_lock = Lock()
+
+CACHE_TTL = {
+    'stats': 30,
+    'leaderboard': 60,
+    'user_points': 10,
+    'count': 45,
+}
+
+
+def init_pool():
+    """تهيئة connection pool بدل فتح اتصال جديد في كل مرة"""
+    global db_pool
+    if not DATABASE_URL:
+        print("DATABASE_URL غير موجود")
+        return
+    try:
+        db_pool = pool.SimpleConnectionPool(2, 20, DATABASE_URL, connect_timeout=5)
+        print("✅ Connection Pool جاهز")
+    except Exception as e:
+        print(f"❌ خطأ في Pool: {e}")
+
+
 def get_connection():
-    return psycopg2.connect(DATABASE_URL)
+    """احصل على اتصال من pool"""
+    global db_pool
+    if db_pool is None:
+        init_pool()
+    try:
+        return db_pool.getconn()
+    except pool.PoolError:
+        print("⚠️ Pool مشغول - ننتظر")
+        return psycopg2.connect(DATABASE_URL)
 
+
+def return_connection(conn):
+    """أرجع الاتصال للـ pool"""
+    global db_pool
+    if db_pool and conn:
+        try:
+            db_pool.putconn(conn)
+        except:
+            pass
+
+
+def get_cache(key):
+    """احصل على بيانات من cache إذا كانت حديثة"""
+    with cache_lock:
+        if key in cache:
+            data, timestamp = cache[key]
+            ttl = CACHE_TTL.get(key, 60)
+            if datetime.now() - timestamp < timedelta(seconds=ttl):
+                return data
+            del cache[key]
+    return None
+
+
+def set_cache(key, data):
+    """احفظ بيانات في cache"""
+    with cache_lock:
+        cache[key] = (data, datetime.now())
+
+
+def clear_cache(pattern=None):
+    """امسح cache (مثل بعد تحديث البيانات)"""
+    with cache_lock:
+        if pattern is None:
+            cache.clear()
+        else:
+            keys_to_delete = [k for k in cache.keys() if pattern in k]
+            for k in keys_to_delete:
+                del cache[k]
+
+
+# ───────────────────────── تخزين البيانات (محسّن) ─────────────────────────
 
 def init_db():
-    """ينشئ الجداول المطلوبة إذا لم تكن موجودة"""
+    """ينشئ الجداول والـ indexes للأداء"""
     if not DATABASE_URL:
         print("DATABASE_URL غير موجود")
         return
@@ -98,7 +178,6 @@ def init_db():
             """
         )
 
-        # جديد: جدول لمتابعة حالة الدفعات من الويب
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS web_payments (
@@ -113,16 +192,22 @@ def init_db():
             """
         )
 
+        # ✅ Indexes مهمة جداً للأداء
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_donations_user ON donations(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_suggestions_user ON suggestions(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_points_total ON user_points(total_points DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_registrations_id ON registrations(user_id)")
+
         conn.commit()
         cur.close()
-        conn.close()
-        print("✅ تم تجهيز قاعدة البيانات بنجاح")
+        return_connection(conn)
+        print("✅ قاعدة البيانات جاهزة + Indexes")
     except Exception as e:
-        print(f"❌ فشل تجهيز قاعدة البيانات: {e}")
+        print(f"❌ خطأ في تجهيز DB: {e}")
 
 
 def upsert_user(user_id, username=None, first_name=None):
-    """يحفظ/يحدّث بيانات المستخدم"""
+    """حفظ/تحديث بيانات المستخدم"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -139,20 +224,26 @@ def upsert_user(user_id, username=None, first_name=None):
         )
         conn.commit()
         cur.close()
-        conn.close()
+        return_connection(conn)
     except Exception as e:
         print(f"upsert_user error: {e}")
 
 
 def get_count():
-    """عدد المسجلين"""
+    """عدد المسجلين (مع cache)"""
+    cached = get_cache('count')
+    if cached is not None:
+        return cached
+    
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM registrations")
         count = cur.fetchone()[0]
         cur.close()
-        conn.close()
+        return_connection(conn)
+        
+        set_cache('count', count)
         return count
     except Exception as e:
         print(f"get_count error: {e}")
@@ -164,10 +255,10 @@ def is_registered(user_id):
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM registrations WHERE user_id = %s", (user_id,))
+        cur.execute("SELECT 1 FROM registrations WHERE user_id = %s LIMIT 1", (user_id,))
         exists = cur.fetchone() is not None
         cur.close()
-        conn.close()
+        return_connection(conn)
         return exists
     except Exception as e:
         print(f"is_registered error: {e}")
@@ -186,7 +277,10 @@ def register_user(user_id):
         added = cur.rowcount > 0
         conn.commit()
         cur.close()
-        conn.close()
+        return_connection(conn)
+        
+        if added:
+            clear_cache('count')  # امسح الـ cache لأن العدد تغيّر
         return added
     except Exception as e:
         print(f"register_user error: {e}")
@@ -207,7 +301,9 @@ def record_donation(user_id, amount, charge_id):
         )
         conn.commit()
         cur.close()
-        conn.close()
+        return_connection(conn)
+        
+        clear_cache('stats')  # امسح الإحصائيات
         return True
     except Exception as e:
         print(f"record_donation error: {e}")
@@ -215,15 +311,22 @@ def record_donation(user_id, amount, charge_id):
 
 
 def get_donations_stats():
-    """إحصائيات الدعم"""
+    """إحصائيات الدعم (مع cache)"""
+    cached = get_cache('donations_stats')
+    if cached is not None:
+        return cached
+    
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM donations")
         count, total = cur.fetchone()
         cur.close()
-        conn.close()
-        return count, total
+        return_connection(conn)
+        
+        result = (count, total)
+        set_cache('donations_stats', result)
+        return result
     except Exception as e:
         print(f"get_donations_stats error: {e}")
         return 0, 0
@@ -243,7 +346,9 @@ def record_suggestion(user_id, content, charge_id):
         )
         conn.commit()
         cur.close()
-        conn.close()
+        return_connection(conn)
+        
+        clear_cache('stats')
         return True
     except Exception as e:
         print(f"record_suggestion error: {e}")
@@ -251,14 +356,20 @@ def record_suggestion(user_id, content, charge_id):
 
 
 def get_suggestions_count():
-    """عدد الاقتراحات"""
+    """عدد الاقتراحات (مع cache)"""
+    cached = get_cache('suggestions_count')
+    if cached is not None:
+        return cached
+    
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM suggestions")
         count = cur.fetchone()[0]
         cur.close()
-        conn.close()
+        return_connection(conn)
+        
+        set_cache('suggestions_count', count)
         return count
     except Exception as e:
         print(f"get_suggestions_count error: {e}")
@@ -274,7 +385,10 @@ def unregister_user(user_id):
         removed = cur.rowcount > 0
         conn.commit()
         cur.close()
-        conn.close()
+        return_connection(conn)
+        
+        if removed:
+            clear_cache('count')
         return removed
     except Exception as e:
         print(f"unregister_user error: {e}")
@@ -302,14 +416,17 @@ def claim_daily_points(user_id):
         if row:
             conn.commit()
             cur.close()
-            conn.close()
+            return_connection(conn)
+            
+            clear_cache(f'user_points_{user_id}')
+            clear_cache('leaderboard')
             return True, row[0]
 
         cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
         existing = cur.fetchone()
         conn.commit()
         cur.close()
-        conn.close()
+        return_connection(conn)
         return False, (existing[0] if existing else 0)
     except Exception as e:
         print(f"claim_daily_points error: {e}")
@@ -317,25 +434,39 @@ def claim_daily_points(user_id):
 
 
 def get_user_points(user_id):
-    """الحصول على نقاط المستخدم"""
+    """الحصول على نقاط المستخدم (مع cache)"""
+    key = f'user_points_{user_id}'
+    cached = get_cache(key)
+    if cached is not None:
+        return cached
+    
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         cur.close()
-        conn.close()
-        return row[0] if row else 0
+        return_connection(conn)
+        
+        points = row[0] if row else 0
+        set_cache(key, points)
+        return points
     except Exception as e:
         print(f"get_user_points error: {e}")
         return 0
 
 
 def get_leaderboard(limit=10):
-    """لائحة الصدارة"""
+    """لائحة الصدارة (محسّن مع cache)"""
+    cached = get_cache('leaderboard')
+    if cached is not None:
+        return cached
+    
     try:
         conn = get_connection()
         cur = conn.cursor()
+        
+        # ✅ Query واحد مع JOIN بدل استعلامات متعددة
         cur.execute(
             """
             SELECT
@@ -352,15 +483,18 @@ def get_leaderboard(limit=10):
         )
         rows = cur.fetchall()
         cur.close()
-        conn.close()
-        return [{"user_id": r[0], "name": r[1], "points": r[2]} for r in rows]
+        return_connection(conn)
+        
+        result = [{"user_id": r[0], "name": r[1], "points": r[2]} for r in rows]
+        set_cache('leaderboard', result)
+        return result
     except Exception as e:
         print(f"get_leaderboard error: {e}")
         return []
 
 
 def mask_name(name):
-    """تعتيم الاسم (يبقى أول حرف ظاهر)"""
+    """تعتيم الاسم"""
     if not name:
         return "*"
     name = str(name).strip()
@@ -382,12 +516,12 @@ def get_site_url():
 
 # ───────────────────────── دوال تيليجرام ─────────────────────────
 def send_message(chat_id, text, reply_markup=None):
-    """إرسال رسالة"""
+    """إرسال رسالة (بدون مزامنة = سريع)"""
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
+        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5)
     except Exception as e:
         print(f"send_message error: {e}")
 
@@ -398,7 +532,7 @@ def answer_callback(callback_id, text, show_alert=False):
         requests.post(
             f"{TELEGRAM_API}/answerCallbackQuery",
             json={"callback_query_id": callback_id, "text": text, "show_alert": show_alert},
-            timeout=10,
+            timeout=5,
         )
     except Exception as e:
         print(f"answer_callback error: {e}")
@@ -416,7 +550,7 @@ def send_invoice(chat_id, amount, title, description, payload_str):
         "prices": [{"label": title, "amount": amount}],
     }
     try:
-        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=10)
+        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=5)
         print(f"send_invoice({payload_str}) -> {r.json()}")
     except Exception as e:
         print(f"send_invoice error: {e}")
@@ -428,7 +562,7 @@ def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
     if error_message:
         payload["error_message"] = error_message
     try:
-        requests.post(f"{TELEGRAM_API}/answerPreCheckoutQuery", json=payload, timeout=10)
+        requests.post(f"{TELEGRAM_API}/answerPreCheckoutQuery", json=payload, timeout=5)
     except Exception as e:
         print(f"answer_pre_checkout error: {e}")
 
@@ -479,6 +613,27 @@ def notify_admin_new_suggestion(user_id, username, content):
         ADMIN_CHAT_ID,
         f"💡 <b>اقتراح جديد من</b> {who}\n\n{content}",
     )
+
+
+# ───────────────────────── Middleware لـ Gzip (ضغط) ─────────────────────────
+@app.after_request
+def gzip_response(response):
+    """ضغط الـ response بـ Gzip لتقليل الحجم"""
+    if response.content_length is None or response.content_length < 500:
+        return response
+    
+    if 'gzip' not in response.headers.get('Content-Encoding', ''):
+        accept_encoding = request.headers.get('Accept-Encoding', '')
+        if 'gzip' in accept_encoding:
+            gzip_buffer = BytesIO()
+            gzip_file = gzip.GzipFile(mode='wb', fileobj=gzip_buffer)
+            gzip_file.write(response.get_data())
+            gzip_file.close()
+            
+            response.set_data(gzip_buffer.getvalue())
+            response.headers['Content-Encoding'] = 'gzip'
+    
+    return response
 
 
 # ───────────────────────── الويب هوك (Webhook) ─────────────────────────
@@ -616,10 +771,10 @@ def webhook():
     return jsonify({"ok": True})
 
 
-# ───────────────────────── API للموقع الويب ─────────────────────────
+# ───────────────────────── API للموقع الويب (محسّن) ─────────────────────────
 @app.route("/api/user/info", methods=["POST"])
 def api_user_info():
-    """الحصول على معلومات المستخدم من البوت"""
+    """الحصول على معلومات المستخدم"""
     data = request.get_json() or {}
     user_id = data.get("user_id")
     
@@ -639,7 +794,7 @@ def api_user_info():
 
 @app.route("/api/register", methods=["POST"])
 def api_register():
-    """تسجيل المستخدم من الموقع"""
+    """تسجيل المستخدم"""
     data = request.get_json() or {}
     user_id = data.get("user_id")
     
@@ -658,7 +813,7 @@ def api_register():
 
 @app.route("/api/donate", methods=["POST"])
 def api_donate():
-    """معالجة الدفع من الموقع"""
+    """معالجة الدفع"""
     data = request.get_json() or {}
     user_id = data.get("user_id")
     amount = data.get("amount")
@@ -679,23 +834,29 @@ def api_donate():
 
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
-    """احصائيات عامة"""
+    """احصائيات عامة (محسّن)"""
     try:
+        cached = get_cache('stats')
+        if cached is not None:
+            return jsonify(cached)
+        
         count, total = get_donations_stats()
-        return jsonify({
+        result = {
             "registered": get_count(),
             "donations_count": count,
             "donations_total": total,
             "suggestions": get_suggestions_count(),
             "leaderboard": get_leaderboard(10),
-        })
+        }
+        set_cache('stats', result)
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/claim-points", methods=["POST"])
 def api_claim_points():
-    """مطالبة النقاط من الموقع"""
+    """مطالبة النقاط"""
     data = request.get_json() or {}
     user_id = data.get("user_id")
     
@@ -713,12 +874,8 @@ def api_claim_points():
         return jsonify({"error": str(e)}), 500
 
 
-# ───────────────────────── الموقع الويب (HTML) ─────────────────────────
-@app.route("/")
-def site_home():
-    """الصفحة الرئيسية"""
-    site_url = get_site_url()
-    return """<!DOCTYPE html>
+# ───────────────────────── الموقع الويب (HTML محسّن) ─────────────────────────
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
@@ -911,6 +1068,7 @@ def site_home():
         let selectedAmount = null;
         let user = tg.initData ? JSON.parse(decodeURIComponent(tg.initData)) : { user: { id: 0 } };
         let userId = user.user?.id || 0;
+        let statsCache = null;
 
         tg.ready();
         tg.expand();
@@ -928,32 +1086,50 @@ def site_home():
         }
 
         function loadHome() {
+            if (statsCache) {
+                renderStats(statsCache);
+                return;
+            }
             fetch('/api/stats').then(r => r.json()).then(data => {
-                document.getElementById('homeStats').innerHTML = `
-                    <div class="stat"><span class="stat-label">المسجلون</span><span class="stat-value">${data.registered} 💍</span></div>
-                    <div class="stat"><span class="stat-label">نجوم الدعم</span><span class="stat-value">${data.donations_total} ⭐</span></div>
-                    <div class="stat"><span class="stat-label">الاقتراحات</span><span class="stat-value">${data.suggestions} 💡</span></div>
-                `;
+                statsCache = data;
+                renderStats(data);
             });
         }
 
+        function renderStats(data) {
+            document.getElementById('homeStats').innerHTML = `
+                <div class="stat"><span class="stat-label">المسجلون</span><span class="stat-value">${data.registered} 💍</span></div>
+                <div class="stat"><span class="stat-label">نجوم الدعم</span><span class="stat-value">${data.donations_total} ⭐</span></div>
+                <div class="stat"><span class="stat-label">الاقتراحات</span><span class="stat-value">${data.suggestions} 💡</span></div>
+            `;
+        }
+
         function loadLeaderboard() {
+            if (statsCache?.leaderboard) {
+                renderLeaderboard(statsCache.leaderboard);
+                return;
+            }
             fetch('/api/stats').then(r => r.json()).then(data => {
-                let html = '';
-                let medals = ['🥇', '🥈', '🥉'];
-                data.leaderboard.forEach((item, i) => {
-                    html += `
-                        <li class="lb-item">
-                            <span class="lb-rank">${medals[i] || i + 1}</span>
-                            <div class="lb-info">
-                                <div class="lb-name">${item.name}</div>
-                                <div class="lb-points">${item.points} نقطة</div>
-                            </div>
-                        </li>
-                    `;
-                });
-                document.getElementById('leaderboardList').innerHTML = html || '<div class="loading">لا توجد بيانات</div>';
+                statsCache = data;
+                renderLeaderboard(data.leaderboard);
             });
+        }
+
+        function renderLeaderboard(lb) {
+            let html = '';
+            let medals = ['🥇', '🥈', '🥉'];
+            lb.forEach((item, i) => {
+                html += `
+                    <li class="lb-item">
+                        <span class="lb-rank">${medals[i] || i + 1}</span>
+                        <div class="lb-info">
+                            <div class="lb-name">${item.name}</div>
+                            <div class="lb-points">${item.points} نقطة</div>
+                        </div>
+                    </li>
+                `;
+            });
+            document.getElementById('leaderboardList').innerHTML = html || '<div class="loading">لا توجد بيانات</div>';
         }
 
         function loadProfile() {
@@ -969,12 +1145,18 @@ def site_home():
 
         function registerUser() {
             fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
-                .then(r => r.json()).then(data => showMessage(data.message, data.success ? 'success' : 'error'));
+                .then(r => r.json()).then(data => {
+                    showMessage(data.message, data.success ? 'success' : 'error');
+                    statsCache = null;
+                });
         }
 
         function claimPoints() {
             fetch('/api/claim-points', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
-                .then(r => r.json()).then(data => showMessage(data.message, data.success ? 'success' : 'error'));
+                .then(r => r.json()).then(data => {
+                    showMessage(data.message, data.success ? 'success' : 'error');
+                    statsCache = null;
+                });
         }
 
         function selectAmount(amount) {
@@ -987,7 +1169,10 @@ def site_home():
         function sendDonation() {
             if (!selectedAmount) return;
             fetch('/api/donate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, amount: selectedAmount }) })
-                .then(r => r.json()).then(data => showMessage(data.message, data.success ? 'success' : 'error'));
+                .then(r => r.json()).then(data => {
+                    showMessage(data.message, data.success ? 'success' : 'error');
+                    statsCache = null;
+                });
         }
 
         function showMessage(text, type) {
@@ -1001,8 +1186,13 @@ def site_home():
         loadHome();
     </script>
 </body>
-</html>
-    """
+</html>"""
+
+
+@app.route("/")
+def site_home():
+    """الصفحة الرئيسية"""
+    return make_response(HTML_TEMPLATE, 200, {'Content-Type': 'text/html; charset=utf-8'})
 
 
 # ───────────────────────── تفعيل الويب هوك ─────────────────────────
@@ -1028,8 +1218,9 @@ def set_webhook():
 
 # تهيئة
 init_db()
+init_pool()
 set_webhook()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
