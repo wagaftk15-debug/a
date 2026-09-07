@@ -6,7 +6,7 @@ from psycopg2 import pool
 from flask import Flask, request, jsonify, make_response
 from datetime import datetime, timedelta
 from threading import Lock
-import hashlib
+import time
 import gzip
 from io import BytesIO
 
@@ -23,118 +23,153 @@ DONATION_AMOUNTS = [100, 200, 500, 1000]
 SUGGESTION_PRICE = 1
 DAILY_POINTS = 100
 
-# ✅ Connection Pool (حل مشكلة الاتصالات المتكررة)
+# Connection Pool محسّن - الإصلاح 1 & 2
 db_pool = None
+pool_lock = Lock()
 
-# ✅ Cache في الذاكرة مع timestamps
+# Cache محسّن - لا نخزن None - الإصلاح 3
 cache = {}
 cache_lock = Lock()
 
 CACHE_TTL = {
-    'stats': 30,
-    'leaderboard': 60,
-    'user_points': 10,
-    'count': 45,
+    'stats': 25,
+    'leaderboard': 50,
+    'user_points': 8,
+    'count': 40,
+    'donations_stats': 25,
+    'suggestions_count': 40,
 }
+
+# الإصلاح 4: تجنب عدم تحميل البيانات
+MAX_RETRIES = 3
+RETRY_DELAY = 0.3
+REQUEST_TIMEOUT = 8
 
 
 def init_pool():
-    """تهيئة connection pool بدل فتح اتصال جديد في كل مرة"""
+    """تهيئة connection pool محسّنة - الإصلاح 1"""
     global db_pool
     if not DATABASE_URL:
         print("DATABASE_URL غير موجود")
-        return
+        return False
     try:
-        db_pool = pool.SimpleConnectionPool(2, 20, DATABASE_URL, connect_timeout=5)
+        with pool_lock:
+            if db_pool is not None:
+                return True
+            db_pool = pool.SimpleConnectionPool(
+                3, 30, DATABASE_URL, 
+                connect_timeout=6,
+                keepalives=1,
+                keepalives_idle=20,
+                keepalives_interval=8,
+                keepalives_count=5
+            )
         print("✅ Connection Pool جاهز")
+        return True
     except Exception as e:
         print(f"❌ خطأ في Pool: {e}")
+        return False
 
 
-def get_connection():
-    """احصل على اتصال من pool"""
+def get_connection(retry=0):
+    """احصل على اتصال مع إعادة محاولة - الإصلاح 2"""
     global db_pool
     if db_pool is None:
-        init_pool()
+        if not init_pool():
+            raise Exception("فشل إنشاء Pool")
+    
     try:
         return db_pool.getconn()
-    except pool.PoolError:
-        print("⚠️ Pool مشغول - ننتظر")
-        return psycopg2.connect(DATABASE_URL)
+    except (pool.PoolError, psycopg2.OperationalError) as e:
+        if retry < MAX_RETRIES:
+            time.sleep(RETRY_DELAY)
+            return get_connection(retry + 1)
+        raise Exception(f"فشل الاتصال: {str(e)[:50]}")
 
 
-def return_connection(conn):
-    """أرجع الاتصال للـ pool"""
+def return_connection(conn, close=False):
+    """أرجع الاتصال للـ pool بأمان"""
     global db_pool
-    if db_pool and conn:
-        try:
+    if conn is None:
+        return
+    try:
+        if close or db_pool is None:
+            conn.close()
+        else:
             db_pool.putconn(conn)
+    except:
+        try:
+            conn.close()
         except:
             pass
 
 
 def get_cache(key):
-    """احصل على بيانات من cache إذا كانت حديثة"""
+    """احصل على بيانات من cache - لا تعيد None - الإصلاح 3"""
     with cache_lock:
         if key in cache:
             data, timestamp = cache[key]
             ttl = CACHE_TTL.get(key, 60)
-            if datetime.now() - timestamp < timedelta(seconds=ttl):
+            if data is not None and datetime.now() - timestamp < timedelta(seconds=ttl):
                 return data
-            del cache[key]
+            try:
+                del cache[key]
+            except:
+                pass
     return None
 
 
 def set_cache(key, data):
-    """احفظ بيانات في cache"""
+    """احفظ بيانات في cache فقط إذا كانت صحيحة - الإصلاح 3"""
+    if data is None or (isinstance(data, (int, list)) and not data):
+        return
     with cache_lock:
         cache[key] = (data, datetime.now())
 
 
 def clear_cache(pattern=None):
-    """امسح cache (مثل بعد تحديث البيانات)"""
+    """امسح cache بأمان"""
     with cache_lock:
         if pattern is None:
             cache.clear()
         else:
-            keys_to_delete = [k for k in cache.keys() if pattern in k]
-            for k in keys_to_delete:
-                del cache[k]
+            keys = [k for k in list(cache.keys()) if pattern in k]
+            for k in keys:
+                try:
+                    del cache[k]
+                except:
+                    pass
 
 
-# ───────────────────────── تخزين البيانات (محسّن) ─────────────────────────
+# ───────────────────────── قاعدة البيانات ─────────────────────────
 
 def init_db():
-    """ينشئ الجداول والـ indexes للأداء"""
+    """ينشئ الجداول والـ indexes - الإصلاح 5"""
     if not DATABASE_URL:
         print("DATABASE_URL غير موجود")
         return
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
 
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 updated_at TIMESTAMP DEFAULT NOW()
             )
-            """
-        )
+        """)
 
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS registrations (
                 user_id BIGINT PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-            """
-        )
+        """)
 
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS donations (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -142,11 +177,9 @@ def init_db():
                 telegram_payment_charge_id TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-            """
-        )
+        """)
 
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS suggestions (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -154,32 +187,17 @@ def init_db():
                 telegram_payment_charge_id TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-            """
-        )
+        """)
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pending_actions (
-                user_id BIGINT PRIMARY KEY,
-                action TEXT NOT NULL,
-                charge_id TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-            """
-        )
-
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS user_points (
                 user_id BIGINT PRIMARY KEY,
                 total_points INTEGER NOT NULL DEFAULT 0,
                 last_claim_date DATE
             )
-            """
-        )
+        """)
 
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS web_payments (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -189,195 +207,221 @@ def init_db():
                 status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT NOW()
             )
-            """
-        )
+        """)
 
-        # ✅ Indexes مهمة جداً للأداء
+        # Indexes - الإصلاح 5
         cur.execute("CREATE INDEX IF NOT EXISTS idx_donations_user ON donations(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_suggestions_user ON suggestions(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_points_total ON user_points(total_points DESC)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_registrations_id ON registrations(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_registrations_created ON registrations(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_donations_date ON donations(created_at DESC)")
 
         conn.commit()
         cur.close()
-        return_connection(conn)
-        print("✅ قاعدة البيانات جاهزة + Indexes")
+        print("✅ قاعدة البيانات جاهزة")
     except Exception as e:
-        print(f"❌ خطأ في تجهيز DB: {e}")
+        print(f"❌ خطأ في DB: {e}")
+    finally:
+        return_connection(conn)
 
 
 def upsert_user(user_id, username=None, first_name=None):
-    """حفظ/تحديث بيانات المستخدم"""
+    """حفظ/تحديث بيانات المستخدم - الإصلاح 6"""
+    if not user_id:
+        return
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO users (user_id, username, first_name, updated_at)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (user_id) DO UPDATE
-            SET username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name,
+            SET username = COALESCE(EXCLUDED.username, users.username),
+                first_name = COALESCE(EXCLUDED.first_name, users.first_name),
                 updated_at = NOW()
-            """,
-            (user_id, username, first_name),
-        )
+        """, (user_id, username or '', first_name or ''))
         conn.commit()
         cur.close()
-        return_connection(conn)
     except Exception as e:
         print(f"upsert_user error: {e}")
+    finally:
+        return_connection(conn)
 
 
 def get_count():
-    """عدد المسجلين (مع cache)"""
+    """عدد المسجلين مع cache - الإصلاح 7"""
     cached = get_cache('count')
     if cached is not None:
         return cached
     
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM registrations")
-        count = cur.fetchone()[0]
+        count = cur.fetchone()[0] or 0
         cur.close()
-        return_connection(conn)
         
-        set_cache('count', count)
+        if count > 0:
+            set_cache('count', count)
         return count
     except Exception as e:
         print(f"get_count error: {e}")
         return 0
+    finally:
+        return_connection(conn)
 
 
 def is_registered(user_id):
-    """التحقق من التسجيل"""
+    """التحقق من التسجيل - الإصلاح 8"""
+    if not user_id:
+        return False
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM registrations WHERE user_id = %s LIMIT 1", (user_id,))
-        exists = cur.fetchone() is not None
+        result = cur.fetchone() is not None
         cur.close()
-        return_connection(conn)
-        return exists
+        return result
     except Exception as e:
         print(f"is_registered error: {e}")
         return False
+    finally:
+        return_connection(conn)
 
 
 def register_user(user_id):
-    """تسجيل المستخدم"""
+    """تسجيل المستخدم - الإصلاح 9"""
+    if not user_id:
+        return False
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO registrations (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
-            (user_id,),
-        )
+        cur.execute("""
+            INSERT INTO registrations (user_id) VALUES (%s) 
+            ON CONFLICT DO NOTHING
+        """, (user_id,))
         added = cur.rowcount > 0
         conn.commit()
         cur.close()
-        return_connection(conn)
         
         if added:
-            clear_cache('count')  # امسح الـ cache لأن العدد تغيّر
+            clear_cache('count')
         return added
     except Exception as e:
         print(f"register_user error: {e}")
         return False
+    finally:
+        return_connection(conn)
 
 
 def record_donation(user_id, amount, charge_id):
-    """تسجيل عملية دعم"""
+    """تسجيل عملية دعم - الإصلاح 10"""
+    if not user_id or amount <= 0:
+        return False
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO donations (user_id, amount, telegram_payment_charge_id)
             VALUES (%s, %s, %s)
-            """,
-            (user_id, amount, charge_id),
-        )
+        """, (user_id, amount, charge_id or ''))
         conn.commit()
         cur.close()
-        return_connection(conn)
         
-        clear_cache('stats')  # امسح الإحصائيات
+        clear_cache('donations_stats')
+        clear_cache('stats')
         return True
     except Exception as e:
         print(f"record_donation error: {e}")
         return False
+    finally:
+        return_connection(conn)
 
 
 def get_donations_stats():
-    """إحصائيات الدعم (مع cache)"""
+    """إحصائيات الدعم مع cache - الإصلاح 11"""
     cached = get_cache('donations_stats')
     if cached is not None:
         return cached
     
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM donations")
-        count, total = cur.fetchone()
+        row = cur.fetchone()
         cur.close()
-        return_connection(conn)
         
-        result = (count, total)
-        set_cache('donations_stats', result)
+        result = (row[0] or 0, row[1] or 0) if row else (0, 0)
+        if result[0] > 0 or result[1] > 0:
+            set_cache('donations_stats', result)
         return result
     except Exception as e:
         print(f"get_donations_stats error: {e}")
-        return 0, 0
+        return (0, 0)
+    finally:
+        return_connection(conn)
 
 
 def record_suggestion(user_id, content, charge_id):
-    """تسجيل اقتراح"""
+    """تسجيل اقتراح - الإصلاح 12"""
+    if not user_id or not content:
+        return False
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO suggestions (user_id, content, telegram_payment_charge_id)
             VALUES (%s, %s, %s)
-            """,
-            (user_id, content, charge_id),
-        )
+        """, (user_id, content[:500], charge_id or ''))
         conn.commit()
         cur.close()
-        return_connection(conn)
         
+        clear_cache('suggestions_count')
         clear_cache('stats')
         return True
     except Exception as e:
         print(f"record_suggestion error: {e}")
         return False
+    finally:
+        return_connection(conn)
 
 
 def get_suggestions_count():
-    """عدد الاقتراحات (مع cache)"""
+    """عدد الاقتراحات مع cache - الإصلاح 13"""
     cached = get_cache('suggestions_count')
     if cached is not None:
         return cached
     
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM suggestions")
-        count = cur.fetchone()[0]
+        count = cur.fetchone()[0] or 0
         cur.close()
-        return_connection(conn)
         
-        set_cache('suggestions_count', count)
+        if count > 0:
+            set_cache('suggestions_count', count)
         return count
     except Exception as e:
         print(f"get_suggestions_count error: {e}")
         return 0
+    finally:
+        return_connection(conn)
 
 
 def unregister_user(user_id):
-    """إلغاء التسجيل"""
+    """إلغاء التسجيل - الإصلاح 14"""
+    if not user_id:
+        return False
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -385,7 +429,6 @@ def unregister_user(user_id):
         removed = cur.rowcount > 0
         conn.commit()
         cur.close()
-        return_connection(conn)
         
         if removed:
             clear_cache('count')
@@ -393,82 +436,93 @@ def unregister_user(user_id):
     except Exception as e:
         print(f"unregister_user error: {e}")
         return False
+    finally:
+        return_connection(conn)
 
 
 def claim_daily_points(user_id):
-    """مطالبة النقاط اليومية"""
+    """مطالبة النقاط اليومية - الإصلاح 15"""
+    if not user_id:
+        return False, 0
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute(
-            """
+        
+        cur.execute("""
             INSERT INTO user_points (user_id, total_points, last_claim_date)
             VALUES (%s, %s, CURRENT_DATE)
             ON CONFLICT (user_id) DO UPDATE
             SET total_points = user_points.total_points + %s,
-                last_claim_date = CURRENT_DATE
+                last_claim_date = CASE 
+                    WHEN user_points.last_claim_date IS DISTINCT FROM CURRENT_DATE THEN CURRENT_DATE
+                    ELSE user_points.last_claim_date
+                END
             WHERE user_points.last_claim_date IS DISTINCT FROM CURRENT_DATE
             RETURNING total_points
-            """,
-            (user_id, DAILY_POINTS, DAILY_POINTS),
-        )
+        """, (user_id, DAILY_POINTS, DAILY_POINTS))
+        
         row = cur.fetchone()
         if row:
             conn.commit()
             cur.close()
-            return_connection(conn)
-            
+            points = row[0] or 0
             clear_cache(f'user_points_{user_id}')
             clear_cache('leaderboard')
-            return True, row[0]
-
+            return True, points
+        
         cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
         existing = cur.fetchone()
         conn.commit()
         cur.close()
-        return_connection(conn)
         return False, (existing[0] if existing else 0)
     except Exception as e:
         print(f"claim_daily_points error: {e}")
         return False, 0
+    finally:
+        return_connection(conn)
 
 
 def get_user_points(user_id):
-    """الحصول على نقاط المستخدم (مع cache)"""
+    """الحصول على نقاط المستخدم - الإصلاح 16"""
+    if not user_id:
+        return 0
     key = f'user_points_{user_id}'
     cached = get_cache(key)
     if cached is not None:
         return cached
     
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         cur.close()
-        return_connection(conn)
         
         points = row[0] if row else 0
-        set_cache(key, points)
+        if points > 0:
+            set_cache(key, points)
         return points
     except Exception as e:
         print(f"get_user_points error: {e}")
         return 0
+    finally:
+        return_connection(conn)
 
 
 def get_leaderboard(limit=10):
-    """لائحة الصدارة (محسّن مع cache)"""
+    """لائحة الصدارة - الإصلاح 17"""
     cached = get_cache('leaderboard')
     if cached is not None:
         return cached
     
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
         
-        # ✅ Query واحد مع JOIN بدل استعلامات متعددة
-        cur.execute(
-            """
+        cur.execute("""
             SELECT
                 p.user_id,
                 COALESCE(NULLIF(u.username, ''), NULLIF(u.first_name, ''), 'مستخدم') AS display_name,
@@ -478,26 +532,27 @@ def get_leaderboard(limit=10):
             WHERE p.total_points > 0
             ORDER BY p.total_points DESC, p.user_id ASC
             LIMIT %s
-            """,
-            (limit,),
-        )
+        """, (min(limit, 20),))
+        
         rows = cur.fetchall()
         cur.close()
-        return_connection(conn)
         
-        result = [{"user_id": r[0], "name": r[1], "points": r[2]} for r in rows]
-        set_cache('leaderboard', result)
+        result = [{"user_id": r[0], "name": r[1] or 'مستخدم', "points": r[2] or 0} for r in rows]
+        if result:
+            set_cache('leaderboard', result)
         return result
     except Exception as e:
         print(f"get_leaderboard error: {e}")
         return []
+    finally:
+        return_connection(conn)
 
 
 def mask_name(name):
     """تعتيم الاسم"""
     if not name:
         return "*"
-    name = str(name).strip()
+    name = str(name).strip()[:20]
     if len(name) <= 1:
         return name
     return name[0] + "*" * (len(name) - 1)
@@ -514,16 +569,26 @@ def get_site_url():
     return ""
 
 
-# ───────────────────────── دوال تيليجرام ─────────────────────────
+# ───────────────────────── تيليجرام ─────────────────────────
+
 def send_message(chat_id, text, reply_markup=None):
-    """إرسال رسالة (بدون مزامنة = سريع)"""
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
+    """إرسال رسالة - الإصلاح 18"""
+    if not chat_id or not text:
+        return False
     try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5)
+        payload = {
+            "chat_id": int(chat_id),
+            "text": text[:4096],
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=REQUEST_TIMEOUT)
+        return True
     except Exception as e:
         print(f"send_message error: {e}")
+        return False
 
 
 def answer_callback(callback_id, text, show_alert=False):
@@ -531,57 +596,60 @@ def answer_callback(callback_id, text, show_alert=False):
     try:
         requests.post(
             f"{TELEGRAM_API}/answerCallbackQuery",
-            json={"callback_query_id": callback_id, "text": text, "show_alert": show_alert},
-            timeout=5,
+            json={"callback_query_id": callback_id, "text": text[:200], "show_alert": show_alert},
+            timeout=REQUEST_TIMEOUT
         )
     except Exception as e:
         print(f"answer_callback error: {e}")
 
 
 def send_invoice(chat_id, amount, title, description, payload_str):
-    """إرسال فاتورة"""
-    payload = {
-        "chat_id": chat_id,
-        "title": title,
-        "description": description,
-        "payload": payload_str,
-        "provider_token": os.environ.get("STRIPE_PROVIDER_TOKEN", ""),
-        "currency": "XTR",
-        "prices": [{"label": title, "amount": amount}],
-        "start_parameter": payload_str,
-    }
+    """إرسال فاتورة - الإصلاح 19"""
+    if not chat_id or amount <= 0:
+        return False
     try:
-        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=10)
+        payload = {
+            "chat_id": int(chat_id),
+            "title": title[:32],
+            "description": description[:255],
+            "payload": payload_str[:128],
+            "provider_token": os.environ.get("STRIPE_PROVIDER_TOKEN", ""),
+            "currency": "XTR",
+            "prices": [{"label": title[:32], "amount": int(amount)}],
+            "start_parameter": payload_str[:64],
+        }
+        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=REQUEST_TIMEOUT)
         result = r.json()
-        print(f"✅ Invoice sent ({payload_str}): {result.get('ok', False)}")
-        if not result.get('ok'):
-            print(f"⚠️ Invoice error: {result.get('description', 'unknown')}")
-            send_message(chat_id, f"⚠️ خطأ في إرسال الفاتورة: {result.get('description', 'حاول لاحقاً')}")
-        return result.get('ok', False)
+        success = result.get('ok', False)
+        if not success:
+            print(f"Invoice error: {result.get('description', 'unknown')}")
+            send_message(chat_id, f"⚠️ خطأ: {result.get('description', 'حاول لاحقاً')[:100]}")
+        return success
     except Exception as e:
-        print(f"❌ send_invoice exception: {e}")
-        send_message(chat_id, f"❌ خطأ في الاتصال: {str(e)}")
+        print(f"send_invoice exception: {e}")
+        send_message(chat_id, f"❌ خطأ اتصال")
         return False
 
 
 def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
     """الرد على طلب ما قبل الدفع"""
-    payload = {"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}
-    if error_message:
-        payload["error_message"] = error_message
     try:
-        requests.post(f"{TELEGRAM_API}/answerPreCheckoutQuery", json=payload, timeout=5)
+        payload = {"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}
+        if error_message:
+            payload["error_message"] = error_message[:200]
+        requests.post(f"{TELEGRAM_API}/answerPreCheckoutQuery", json=payload, timeout=REQUEST_TIMEOUT)
     except Exception as e:
         print(f"answer_pre_checkout error: {e}")
 
 
 def donation_keyboard():
     """لوحة مفاتيح الدعم"""
-    keyboard = [
-        [{"text": f"⭐ دعم بـ {amount} نجمة", "callback_data": f"donate_{amount}"}]
-        for amount in DONATION_AMOUNTS
-    ]
-    return {"inline_keyboard": keyboard}
+    return {
+        "inline_keyboard": [
+            [{"text": f"⭐ {amount}", "callback_data": f"donate_{amount}"}]
+            for amount in DONATION_AMOUNTS
+        ]
+    }
 
 
 def main_keyboard():
@@ -590,11 +658,11 @@ def main_keyboard():
         "inline_keyboard": [
             [{"text": "✅ بدي أتزوج", "callback_data": "want_marry"}],
             [
-                {"text": "🎁 نقاط اليوم", "callback_data": "claim_points"},
-                {"text": "🏆 الصدارة", "callback_data": "show_leaderboard"},
+                {"text": "🎁 نقاط", "callback_data": "claim_points"},
+                {"text": "🏆 صدارة", "callback_data": "show_leaderboard"},
             ],
-            [{"text": "💻 فتح الموقع", "web_app": {"url": get_site_url() or "https://t.me"}}],
-            [{"text": "❌ إلغاء الاشتراك", "callback_data": "unsubscribe"}],
+            [{"text": "💻 موقع", "web_app": {"url": get_site_url() or "https://t.me"}}],
+            [{"text": "❌ إلغاء", "callback_data": "unsubscribe"}],
         ]
     }
 
@@ -603,214 +671,179 @@ def build_leaderboard_text():
     """بناء نص لائحة الصدارة"""
     top = get_leaderboard(10)
     if not top:
-        return "لسا محدا كسب نقاط 🙂"
+        return "🙂 لا توجد بيانات"
     medals = ["🥇", "🥈", "🥉"]
-    lines = ["🏆 <b>لائحة الصدارة بالنقاط:</b>\n"]
+    lines = ["🏆 <b>الصدارة:</b>\n"]
     for i, u in enumerate(top):
-        rank_icon = medals[i] if i < len(medals) else f"{i + 1}."
-        lines.append(f"{rank_icon} {mask_name(u['name'])} — {u['points']} نقطة")
+        medal = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{medal} {mask_name(u['name'])} — {u['points']}⭐")
     return "\n".join(lines)
 
 
 def notify_admin_new_suggestion(user_id, username, content):
-    """إشعار الأدمن باقتراح جديد"""
+    """إشعار الأدمن"""
     if not ADMIN_CHAT_ID:
         return
-    who = f"@{username}" if username else f"id:{user_id}"
-    send_message(
-        ADMIN_CHAT_ID,
-        f"💡 <b>اقتراح جديد من</b> {who}\n\n{content}",
-    )
+    who = f"@{username}" if username else f"ID:{user_id}"
+    send_message(ADMIN_CHAT_ID, f"💡 من {who}\n\n{content[:200]}")
 
 
-# ───────────────────────── Middleware لـ Gzip (ضغط) ─────────────────────────
+# ───────────────────────── Gzip ─────────────────────────
+
 @app.after_request
 def gzip_response(response):
-    """ضغط الـ response بـ Gzip لتقليل الحجم"""
+    """ضغط Gzip - الإصلاح 20"""
     if response.content_length is None or response.content_length < 500:
         return response
     
-    if 'gzip' not in response.headers.get('Content-Encoding', ''):
-        accept_encoding = request.headers.get('Accept-Encoding', '')
-        if 'gzip' in accept_encoding:
-            gzip_buffer = BytesIO()
-            gzip_file = gzip.GzipFile(mode='wb', fileobj=gzip_buffer)
-            gzip_file.write(response.get_data())
-            gzip_file.close()
-            
-            response.set_data(gzip_buffer.getvalue())
+    accept = request.headers.get('Accept-Encoding', '')
+    if 'gzip' in accept and 'gzip' not in response.headers.get('Content-Encoding', ''):
+        try:
+            buf = BytesIO()
+            gz = gzip.GzipFile(mode='wb', fileobj=buf)
+            gz.write(response.get_data())
+            gz.close()
+            response.set_data(buf.getvalue())
             response.headers['Content-Encoding'] = 'gzip'
+        except:
+            pass
     
     return response
 
 
-# ───────────────────────── الويب هوك (Webhook) ─────────────────────────
+# ───────────────────────── Webhook ─────────────────────────
+
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
+    """معالج الويب هوك الرئيسي"""
     update = request.get_json(force=True, silent=True) or {}
 
-    # طلب تأكيد ما قبل الدفع
     if "pre_checkout_query" in update:
         pcq = update["pre_checkout_query"]
         answer_pre_checkout(pcq["id"], ok=True)
         return jsonify({"ok": True})
 
-    # رسالة نصية أو دفعة
     if "message" in update:
         msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        text = msg.get("text", "") or ""
+        chat_id = msg.get("chat", {}).get("id")
+        text = (msg.get("text") or "").strip()
 
         sender = msg.get("from", {})
         user_id = sender.get("id")
         if user_id:
             upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
-        # دفعة ناجحة
         if "successful_payment" in msg:
             sp = msg["successful_payment"]
             amount = sp.get("total_amount", 0)
-            charge_id = sp.get("telegram_payment_charge_id")
-            invoice_payload = sp.get("invoice_payload", "") or ""
+            charge_id = sp.get("telegram_payment_charge_id", "")
+            invoice_payload = sp.get("invoice_payload", "")
 
             if invoice_payload.startswith("suggest_"):
-                send_message(
-                    chat_id,
-                    "✅ تم الدفع بنجاح 💡\nهلأ اكتبلنا فكرتك:",
-                )
+                send_message(chat_id, "✅ الآن اكتب اقتراحك:")
             else:
                 record_donation(user_id, amount, charge_id)
-                send_message(
-                    chat_id,
-                    f"💛 شكراً إلك!\nتم استلام دعمك: <b>{amount} نجمة</b> ⭐️",
-                )
+                send_message(chat_id, f"💛 شكراً! تم استلام {amount}⭐")
             return jsonify({"ok": True})
 
         if text.startswith("/start"):
-            keyboard = main_keyboard()
-            send_message(
-                chat_id,
-                "👋 أهلاً فيك في <b>بوت زوجوني</b> 💍\n\nاختر ما يناسبك:",
-                keyboard,
-            )
-
+            send_message(chat_id, "👋 أهلاً في <b>بوت زوجوني</b> 💍", main_keyboard())
         elif text in ("/عدد", "/count"):
-            send_message(chat_id, f"<b>عدد المسجلين:</b> {get_count()} 💍")
-
+            send_message(chat_id, f"<b>المسجلون:</b> {get_count()} 💍")
         elif text in ("/نقاطي", "/points"):
-            send_message(chat_id, f"<b>مجموع نقاطك:</b> {get_user_points(user_id)} ⭐")
-
+            send_message(chat_id, f"<b>نقاطك:</b> {get_user_points(user_id)} ⭐")
         elif text in ("/الصدارة", "/leaderboard"):
             send_message(chat_id, build_leaderboard_text())
-
         elif text in ("/انسحب", "/unsubscribe"):
             if is_registered(user_id):
-                send_message(
-                    chat_id,
-                    "متأكد بدك تنسحب؟",
-                    {
-                        "inline_keyboard": [
-                            [{"text": "✅ نعم", "callback_data": "confirm_unsubscribe"}],
-                            [{"text": "🙅 لأ", "callback_data": "cancel_unsubscribe"}],
-                        ]
-                    },
-                )
+                send_message(chat_id, "متأكد؟", {
+                    "inline_keyboard": [
+                        [{"text": "✅ نعم", "callback_data": "confirm_unsubscribe"}],
+                        [{"text": "🙅 لأ", "callback_data": "cancel_unsubscribe"}],
+                    ]
+                })
             else:
                 send_message(chat_id, "أنت مش مسجل 🙂")
 
-    # ضغطة على زر
     elif "callback_query" in update:
         cq = update["callback_query"]
         sender = cq.get("from", {})
-        user_id = sender["id"]
-        chat_id = cq["message"]["chat"]["id"]
-        callback_id = cq["id"]
+        user_id = sender.get("id")
+        chat_id = cq.get("message", {}).get("chat", {}).get("id")
+        callback_id = cq.get("id")
         data_key = cq.get("data", "")
 
         upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
         if data_key == "want_marry":
             if is_registered(user_id):
-                answer_callback(callback_id, "أنت مسجل مسبقاً 😄")
+                answer_callback(callback_id, "أنت مسجل 😄")
             else:
                 if register_user(user_id):
-                    answer_callback(callback_id, "✅ تم تسجيلك!")
-                    send_message(
-                        chat_id,
-                        f"🎉 تم تسجيلك بنجاح!\n<b>المسجلون الآن:</b> {get_count()} 💍",
-                    )
+                    answer_callback(callback_id, "✅ تم!")
+                    send_message(chat_id, f"🎉 تم تسجيلك!\n<b>الآن:</b> {get_count()} 💍")
 
         elif data_key == "claim_points":
             success, total = claim_daily_points(user_id)
             if success:
-                answer_callback(callback_id, f"🎁 +{DAILY_POINTS} نقطة!")
-                send_message(
-                    chat_id,
-                    f"🎉 أخدت {DAILY_POINTS} نقطة اليوم!\n<b>مجموعك الآن:</b> {total} ⭐",
-                )
+                answer_callback(callback_id, f"✅ +{DAILY_POINTS}!")
+                send_message(chat_id, f"🎉 +{DAILY_POINTS}\n<b>المجموع:</b> {total}⭐")
             else:
-                answer_callback(callback_id, "أخدت نقاطك اليوم مسبقاً 🙏", show_alert=True)
+                answer_callback(callback_id, "اليوم أخذت نقاطك", show_alert=True)
 
         elif data_key == "show_leaderboard":
             answer_callback(callback_id, "")
             send_message(chat_id, build_leaderboard_text())
 
         elif data_key == "unsubscribe":
-            if is_registered(user_id):
-                send_message(
-                    chat_id,
-                    "متأكد؟",
-                    {
-                        "inline_keyboard": [
-                            [{"text": "✅ نعم", "callback_data": "confirm_unsubscribe"}],
-                            [{"text": "🙅 لأ", "callback_data": "cancel_unsubscribe"}],
-                        ]
-                    },
-                )
+            send_message(chat_id, "متأكد؟", {
+                "inline_keyboard": [
+                    [{"text": "✅ نعم", "callback_data": "confirm_unsubscribe"}],
+                    [{"text": "🙅 لأ", "callback_data": "cancel_unsubscribe"}],
+                ]
+            })
 
         elif data_key == "confirm_unsubscribe":
             if unregister_user(user_id):
-                answer_callback(callback_id, "✅ تم الانسحاب")
-                send_message(chat_id, f"👋 تم حذفك\n<b>المسجلون الآن:</b> {get_count()} 💍")
+                answer_callback(callback_id, "✅ تم حذفك")
+                send_message(chat_id, f"👋 حذفت\n<b>الآن:</b> {get_count()} 💍")
 
         elif data_key == "cancel_unsubscribe":
             answer_callback(callback_id, "👍 تم التراجع")
         
-        # ✅ معالج الدعم المباشر (donate_100, donate_200, إلخ)
         elif data_key.startswith("donate_"):
             try:
-                amount = int(data_key.replace("donate_", ""))
-                success = send_invoice(chat_id, amount, f"دعم بـ {amount} نجمة", f"شكراً لدعمك! 💛", f"donate_{amount}")
-                if success:
-                    answer_callback(callback_id, "✅ تم إرسال الفاتورة!")
-                else:
-                    answer_callback(callback_id, "❌ خطأ في الفاتورة", show_alert=True)
-            except Exception as e:
-                print(f"donate error: {e}")
+                amount = int(data_key.split("_")[1])
+                if amount in DONATION_AMOUNTS:
+                    success = send_invoice(chat_id, amount, f"دعم {amount}⭐", "شكراً!", f"donate_{amount}")
+                    answer_callback(callback_id, "✅" if success else "❌", show_alert=not success)
+            except:
                 answer_callback(callback_id, "❌ خطأ", show_alert=True)
 
     return jsonify({"ok": True})
 
 
-# ───────────────────────── API للموقع الويب (محسّن) ─────────────────────────
+# ───────────────────────── API ─────────────────────────
+
 @app.route("/api/user/info", methods=["POST"])
 def api_user_info():
-    """الحصول على معلومات المستخدم"""
+    """معلومات المستخدم"""
     data = request.get_json() or {}
     user_id = data.get("user_id")
     
     if not user_id:
-        return jsonify({"error": "user_id required"}), 400
+        return jsonify({"error": "missing"}), 400
     
     try:
+        donations_count, _ = get_donations_stats()
         return jsonify({
             "user_id": user_id,
             "is_registered": is_registered(user_id),
             "points": get_user_points(user_id),
-            "donation_count": get_donations_stats()[0],
+            "donation_count": donations_count,
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)[:50]}), 500
 
 
 @app.route("/api/register", methods=["POST"])
@@ -820,16 +853,16 @@ def api_register():
     user_id = data.get("user_id")
     
     if not user_id:
-        return jsonify({"error": "user_id required"}), 400
+        return jsonify({"error": "missing"}), 400
     
     try:
         result = register_user(user_id)
         return jsonify({
             "success": result,
-            "message": "تم التسجيل بنجاح 🎉" if result else "أنت مسجل مسبقاً"
+            "message": "✅ تم!" if result else "مسجل مسبقاً"
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)[:50]}), 500
 
 
 @app.route("/api/donate", methods=["POST"])
@@ -838,54 +871,48 @@ def api_donate():
     data = request.get_json() or {}
     user_id = data.get("user_id")
     amount = data.get("amount")
-    charge_id = data.get("charge_id", "web_" + str(datetime.now().timestamp()))
+    charge_id = data.get("charge_id", f"web_{int(time.time())}")
     
     if not user_id or not amount:
-        return jsonify({"error": "user_id and amount required"}), 400
+        return jsonify({"error": "missing"}), 400
     
     try:
         record_donation(user_id, amount, charge_id)
         return jsonify({
             "success": True,
-            "message": f"شكراً لدعمك 💛 {amount} نجمة ⭐️"
+            "message": f"💛 شكراً {amount}⭐"
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/test-invoice/<int:user_id>/<int:amount>", methods=["GET"])
-def api_test_invoice(user_id, amount):
-    """اختبار إرسال فاتورة (للتطوير فقط)"""
-    if amount not in DONATION_AMOUNTS:
-        return jsonify({"error": f"invalid amount"}), 400
-    
-    try:
-        success = send_invoice(user_id, amount, f"اختبار {amount}", "اختبار", f"test_{amount}")
-        return jsonify({"success": success, "user_id": user_id, "amount": amount})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)[:50]}), 500
 
 
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
-    """احصائيات عامة (محسّن)"""
+    """الإحصائيات العامة"""
     try:
         cached = get_cache('stats')
         if cached is not None:
             return jsonify(cached)
         
-        count, total = get_donations_stats()
+        count = get_count()
+        donations_count, donations_total = get_donations_stats()
+        suggestions = get_suggestions_count()
+        leaderboard = get_leaderboard(10)
+        
         result = {
-            "registered": get_count(),
-            "donations_count": count,
-            "donations_total": total,
-            "suggestions": get_suggestions_count(),
-            "leaderboard": get_leaderboard(10),
+            "registered": count,
+            "donations_count": donations_count,
+            "donations_total": donations_total,
+            "suggestions": suggestions,
+            "leaderboard": leaderboard,
         }
-        set_cache('stats', result)
+        
+        if count > 0 or donations_count > 0:
+            set_cache('stats', result)
+        
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)[:50]}), 500
 
 
 @app.route("/api/claim-points", methods=["POST"])
@@ -895,389 +922,243 @@ def api_claim_points():
     user_id = data.get("user_id")
     
     if not user_id:
-        return jsonify({"error": "user_id required"}), 400
+        return jsonify({"error": "missing"}), 400
     
     try:
         success, total = claim_daily_points(user_id)
         return jsonify({
             "success": success,
             "points": total,
-            "message": f"+{DAILY_POINTS} نقطة!" if success else "أخدت نقاطك اليوم مسبقاً"
+            "message": f"✅ +{DAILY_POINTS}!" if success else "اليوم أخذت نقاطك"
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)[:50]}), 500
 
 
 @app.route("/api/send-invoice", methods=["POST"])
 def api_send_invoice():
-    """إرسال فاتورة مباشرة من الموقع"""
+    """إرسال فاتورة من الموقع"""
     data = request.get_json() or {}
     user_id = data.get("user_id")
     amount = data.get("amount")
     
     if not user_id or not amount:
-        return jsonify({"error": "user_id and amount required"}), 400
+        return jsonify({"error": "missing"}), 400
     
     if amount not in DONATION_AMOUNTS:
-        return jsonify({"error": f"invalid amount. allowed: {DONATION_AMOUNTS}"}), 400
+        return jsonify({"error": "invalid_amount"}), 400
     
     try:
-        # إرسال الفاتورة للمستخدم في البوت
-        success = send_invoice(
-            user_id,
-            amount,
-            f"دعم بـ {amount} نجمة",
-            f"شكراً لدعمك! 💛",
-            f"donate_{amount}"
-        )
+        success = send_invoice(user_id, amount, f"دعم {amount}⭐", "شكراً!", f"donate_{amount}")
         if success:
             return jsonify({
                 "success": True,
-                "message": f"✅ تم إرسال فاتورة الدفع {amount} نجمة للبوت ⭐"
+                "message": f"✅ فاتورة {amount}⭐"
             })
         else:
             return jsonify({
                 "success": False,
-                "message": "❌ فشل إرسال الفاتورة. حاول لاحقاً"
+                "message": "❌ فشل"
             }), 500
     except Exception as e:
         print(f"api_send_invoice error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)[:50]}), 500
 
 
-# ───────────────────────── الموقع الويب (HTML محسّن) ─────────────────────────
+# ───────────────────────── الموقع ─────────────────────────
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>بوت زوجوني 💍</title>
+    <title>💍 بوت زوجوني</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         * { box-sizing: border-box; }
         body {
             margin: 0;
-            font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #1e1a2e 0%, #16213e 100%);
             color: #fff;
             min-height: 100vh;
-            padding: 12px;
+            padding: 10px;
         }
-        .container { max-width: 500px; margin: 0 auto; }
-        .header {
-            text-align: center;
-            padding: 20px 0;
-            border-bottom: 2px solid rgba(255,255,255,0.1);
-            margin-bottom: 20px;
-        }
-        .logo { font-size: 48px; margin: 0; }
-        h1 {
-            font-size: 24px;
-            margin: 8px 0 0;
-            background: linear-gradient(90deg, #ff5a8a, #7b3fe4);
-            -webkit-background-clip: text;
-            background-clip: text;
-            color: transparent;
-        }
-        .tabs {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-bottom: 20px;
-        }
-        .tab-btn {
-            padding: 12px;
-            background: rgba(255,255,255,0.06);
-            border: 2px solid rgba(255,255,255,0.1);
-            color: #fff;
-            border-radius: 10px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: bold;
-            transition: all 0.3s;
-        }
-        .tab-btn.active {
-            background: linear-gradient(90deg, #ff5a8a, #7b3fe4);
-            border-color: #ff5a8a;
-        }
-        .tab-content {
-            display: none;
-            animation: slideIn 0.3s ease;
-        }
-        .tab-content.active { display: block; }
+        .container { max-width: 480px; margin: 0 auto; }
+        .header { text-align: center; padding: 15px 0; margin-bottom: 15px; }
+        .logo { font-size: 40px; }
+        h1 { font-size: 22px; margin: 8px 0 0; background: linear-gradient(90deg, #ff5a8a, #7b3fe4); -webkit-background-clip: text; background-clip: text; color: transparent; }
+        .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 15px; }
+        .tab-btn { padding: 10px 8px; background: rgba(255,255,255,0.06); border: 2px solid rgba(255,255,255,0.1); color: #fff; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 600; }
+        .tab-btn.active { background: linear-gradient(90deg, #ff5a8a, #7b3fe4); border-color: #ff5a8a; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; animation: slideIn 0.2s ease; }
         @keyframes slideIn { from { opacity: 0; } to { opacity: 1; } }
-        
-        .card {
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 16px;
-            padding: 18px;
-            margin-bottom: 15px;
-        }
-        .stat { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
-        .stat:last-child { border-bottom: none; }
-        .stat-label { color: #a0a0b0; font-size: 14px; }
-        .stat-value { font-weight: bold; color: #ff5a8a; }
-        
-        .btn {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(90deg, #ff5a8a, #7b3fe4);
-            color: #fff;
-            border: none;
-            border-radius: 10px;
-            font-weight: bold;
-            font-size: 15px;
-            cursor: pointer;
-            transition: transform 0.2s;
-            margin-bottom: 10px;
-        }
-        .btn:active { transform: scale(0.98); }
-        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        
-        .amount-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-bottom: 15px;
-        }
-        .amount-btn {
-            padding: 12px;
-            background: rgba(255,255,255,0.06);
-            border: 2px solid rgba(255,255,255,0.1);
-            color: #fff;
-            border-radius: 10px;
-            cursor: pointer;
-            font-weight: bold;
-            transition: all 0.3s;
-        }
-        .amount-btn.selected {
-            background: #ff5a8a;
-            border-color: #ff5a8a;
-        }
-        
-        .leaderboard { list-style: none; padding: 0; margin: 0; }
-        .lb-item {
-            display: flex;
-            align-items: center;
-            padding: 12px;
-            background: rgba(255,255,255,0.03);
-            border-radius: 10px;
-            margin-bottom: 8px;
-        }
-        .lb-rank { font-size: 20px; margin-right: 12px; }
+        .card { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 15px; margin-bottom: 12px; }
+        .stat { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+        .stat:last-child { border-bottom: 0; }
+        .stat-label { font-size: 13px; color: #a0a0b0; }
+        .stat-value { font-weight: 600; color: #ff5a8a; }
+        .btn { width: 100%; padding: 12px; background: linear-gradient(90deg, #ff5a8a, #7b3fe4); color: #fff; border: 0; border-radius: 8px; font-weight: 600; cursor: pointer; margin-bottom: 8px; }
+        .btn:active { opacity: 0.8; }
+        .amount-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .amount-btn { padding: 12px; background: rgba(255,255,255,0.06); border: 2px solid rgba(255,255,255,0.1); color: #fff; border-radius: 8px; cursor: pointer; font-weight: 600; }
+        .amount-btn:active { background: #ff5a8a; border-color: #ff5a8a; }
+        .lb-item { display: flex; align-items: center; padding: 10px; background: rgba(255,255,255,0.02); border-radius: 8px; margin-bottom: 6px; font-size: 13px; }
+        .lb-rank { font-size: 18px; margin-right: 10px; }
         .lb-info { flex: 1; }
-        .lb-name { font-weight: bold; }
-        .lb-points { color: #ff5a8a; font-weight: bold; }
-        
-        .loading { text-align: center; padding: 20px; color: #a0a0b0; }
-        .message {
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-            text-align: center;
-            animation: slideIn 0.3s ease;
-        }
-        .message.success { background: rgba(76, 175, 80, 0.2); color: #4caf50; }
-        .message.error { background: rgba(244, 67, 54, 0.2); color: #f44336; }
+        .lb-name { font-weight: 600; }
+        .lb-points { color: #ff5a8a; font-size: 12px; }
+        .loading { text-align: center; padding: 20px; color: #888; }
+        .message { padding: 10px; border-radius: 6px; margin-bottom: 10px; text-align: center; font-size: 13px; animation: slideIn 0.2s; }
+        .message.success { background: rgba(76, 175, 80, 0.15); color: #4caf50; }
+        .message.error { background: rgba(244, 67, 54, 0.15); color: #f44336; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <div class="logo">💍</div>
-            <h1>بوت زوجوني</h1>
+            <h1>زوجوني</h1>
         </div>
 
         <div class="tabs">
-            <button class="tab-btn active" onclick="switchTab('home')">🏠 الرئيسية</button>
-            <button class="tab-btn" onclick="switchTab('leaderboard')">🏆 الصدارة</button>
-            <button class="tab-btn" onclick="switchTab('donate')">⭐ ادعم</button>
-            <button class="tab-btn" onclick="switchTab('profile')">👤 ملفي</button>
+            <button class="tab-btn active" onclick="switchTab('home')">🏠</button>
+            <button class="tab-btn" onclick="switchTab('leaderboard')">🏆</button>
+            <button class="tab-btn" onclick="switchTab('donate')">⭐</button>
+            <button class="tab-btn" onclick="switchTab('profile')">👤</button>
         </div>
 
+        <div id="messages"></div>
+
         <div id="home" class="tab-content active">
-            <div class="card">
-                <div id="homeStats">جاري التحميل...</div>
-            </div>
-            <button class="btn" onclick="registerUser()">✅ بدي أتزوج</button>
-            <button class="btn" onclick="claimPoints()">🎁 خد نقاطك اليوم</button>
+            <div class="card" id="homeStats"><div class="loading">جاري...</div></div>
+            <button class="btn" onclick="registerUser()">✅ تسجيل</button>
+            <button class="btn" onclick="claimPoints()">🎁 نقاط اليوم</button>
         </div>
 
         <div id="leaderboard" class="tab-content">
-            <div class="card">
-                <ul class="leaderboard" id="leaderboardList">
-                    <div class="loading">جاري التحميل...</div>
-                </ul>
-            </div>
+            <div class="card" id="leaderboardList"><div class="loading">جاري...</div></div>
         </div>
 
         <div id="donate" class="tab-content">
             <div class="card">
-                <h3 style="margin: 0 0 15px; text-align: center;">⭐ اختر المبلغ</h3>
-                <p style="text-align: center; color: #a0a0b0; font-size: 13px; margin: 0 0 15px;">الدفع يتم مباشرة عند الاختيار</p>
-                <div class="amount-grid">
-                    <button class="amount-btn" onclick="sendDonationDirect(100)">💛 100 ⭐</button>
-                    <button class="amount-btn" onclick="sendDonationDirect(200)">💛 200 ⭐</button>
-                    <button class="amount-btn" onclick="sendDonationDirect(500)">💛 500 ⭐</button>
-                    <button class="amount-btn" onclick="sendDonationDirect(1000)">💛 1000 ⭐</button>
+                <div style="text-align: center; margin-bottom: 15px;">
+                    <div style="font-size: 14px; margin-bottom: 10px;">⭐ اختر المبلغ</div>
+                    <div class="amount-grid">
+                        <button class="amount-btn" onclick="sendDonation(100)">100 ⭐</button>
+                        <button class="amount-btn" onclick="sendDonation(200)">200 ⭐</button>
+                        <button class="amount-btn" onclick="sendDonation(500)">500 ⭐</button>
+                        <button class="amount-btn" onclick="sendDonation(1000)">1000 ⭐</button>
+                    </div>
                 </div>
-            </div>
-            <div style="text-align: center; color: #a0a0b0; font-size: 12px; padding: 10px;">
-                💳 يتم التحويل إلى التطبيق لإكمال الدفع
             </div>
         </div>
 
         <div id="profile" class="tab-content">
-            <div class="card">
-                <div id="profileStats">جاري التحميل...</div>
-            </div>
+            <div class="card" id="profileStats"><div class="loading">جاري...</div></div>
         </div>
-
-        <div id="messages"></div>
     </div>
 
     <script>
-        let tg = window.Telegram.WebApp;
-        let selectedAmount = null;
-        let user = tg.initData ? JSON.parse(decodeURIComponent(tg.initData)) : { user: { id: 0 } };
-        let userId = user.user?.id || 0;
+        let tg = window.Telegram?.WebApp;
+        let user = tg?.initDataUnsafe?.user || { id: 0 };
+        let userId = user.id || 0;
         let statsCache = null;
 
-        tg.ready();
-        tg.expand();
+        if (tg) tg.ready();
 
         function switchTab(tab) {
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-            
+            document.querySelectorAll('.tab-content').forEach(e => e.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
             document.getElementById(tab).classList.add('active');
             event.target.classList.add('active');
-            
             if (tab === 'leaderboard') loadLeaderboard();
             if (tab === 'profile') loadProfile();
-            if (tab === 'home') loadHome();
         }
 
         function loadHome() {
-            if (statsCache) {
-                renderStats(statsCache);
-                return;
-            }
+            if (statsCache) { renderStats(statsCache); return; }
             fetch('/api/stats').then(r => r.json()).then(data => {
-                statsCache = data;
-                renderStats(data);
-            });
+                if (data.registered !== undefined) {
+                    statsCache = data;
+                    renderStats(data);
+                }
+            }).catch(e => console.error(e));
         }
 
-        function renderStats(data) {
-            document.getElementById('homeStats').innerHTML = `
-                <div class="stat"><span class="stat-label">المسجلون</span><span class="stat-value">${data.registered} 💍</span></div>
-                <div class="stat"><span class="stat-label">نجوم الدعم</span><span class="stat-value">${data.donations_total} ⭐</span></div>
-                <div class="stat"><span class="stat-label">الاقتراحات</span><span class="stat-value">${data.suggestions} 💡</span></div>
+        function renderStats(d) {
+            let html = `
+                <div class="stat"><span class="stat-label">المسجلون</span><span class="stat-value">${d.registered || 0} 💍</span></div>
+                <div class="stat"><span class="stat-label">الدعم</span><span class="stat-value">${d.donations_total || 0} ⭐</span></div>
+                <div class="stat"><span class="stat-label">الاقتراحات</span><span class="stat-value">${d.suggestions || 0} 💡</span></div>
             `;
+            document.getElementById('homeStats').innerHTML = html;
         }
 
         function loadLeaderboard() {
-            if (statsCache?.leaderboard) {
-                renderLeaderboard(statsCache.leaderboard);
-                return;
-            }
+            if (statsCache?.leaderboard) { renderLeaderboard(statsCache.leaderboard); return; }
             fetch('/api/stats').then(r => r.json()).then(data => {
-                statsCache = data;
-                renderLeaderboard(data.leaderboard);
-            });
+                if (data.leaderboard) {
+                    statsCache = data;
+                    renderLeaderboard(data.leaderboard);
+                }
+            }).catch(e => console.error(e));
         }
 
         function renderLeaderboard(lb) {
-            let html = '';
             let medals = ['🥇', '🥈', '🥉'];
-            lb.forEach((item, i) => {
-                html += `
-                    <li class="lb-item">
-                        <span class="lb-rank">${medals[i] || i + 1}</span>
-                        <div class="lb-info">
-                            <div class="lb-name">${item.name}</div>
-                            <div class="lb-points">${item.points} نقطة</div>
-                        </div>
-                    </li>
-                `;
-            });
-            document.getElementById('leaderboardList').innerHTML = html || '<div class="loading">لا توجد بيانات</div>';
+            let html = lb.map((i, n) => `
+                <div class="lb-item">
+                    <span class="lb-rank">${medals[n] || n + 1}</span>
+                    <div class="lb-info"><div class="lb-name">${i.name}</div><div class="lb-points">${i.points}⭐</div></div>
+                </div>
+            `).join('') || '<div class="loading">لا توجد بيانات</div>';
+            document.getElementById('leaderboardList').innerHTML = html;
         }
 
         function loadProfile() {
             fetch('/api/user/info', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
-                .then(r => r.json()).then(data => {
-                    document.getElementById('profileStats').innerHTML = `
-                        <div class="stat"><span class="stat-label">ID</span><span class="stat-value">${data.user_id}</span></div>
-                        <div class="stat"><span class="stat-label">الحالة</span><span class="stat-value">${data.is_registered ? '✅ مسجل' : '❌ غير مسجل'}</span></div>
-                        <div class="stat"><span class="stat-label">النقاط</span><span class="stat-value">${data.points} ⭐</span></div>
+                .then(r => r.json()).then(d => {
+                    let html = `
+                        <div class="stat"><span class="stat-label">ID</span><span class="stat-value">${d.user_id}</span></div>
+                        <div class="stat"><span class="stat-label">الحالة</span><span class="stat-value">${d.is_registered ? '✅' : '❌'}</span></div>
+                        <div class="stat"><span class="stat-label">النقاط</span><span class="stat-value">${d.points || 0} ⭐</span></div>
                     `;
-                });
+                    document.getElementById('profileStats').innerHTML = html;
+                }).catch(e => console.error(e));
         }
 
         function registerUser() {
             fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
-                .then(r => r.json()).then(data => {
-                    showMessage(data.message, data.success ? 'success' : 'error');
+                .then(r => r.json()).then(d => {
+                    showMsg(d.message, d.success ? 'success' : 'error');
                     statsCache = null;
-                });
+                }).catch(e => showMsg('خطأ', 'error'));
         }
 
         function claimPoints() {
             fetch('/api/claim-points', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) })
-                .then(r => r.json()).then(data => {
-                    showMessage(data.message, data.success ? 'success' : 'error');
+                .then(r => r.json()).then(d => {
+                    showMsg(d.message, d.success ? 'success' : 'error');
                     statsCache = null;
-                });
+                }).catch(e => showMsg('خطأ', 'error'));
         }
 
-        function sendDonationDirect(amount) {
-            const button = event.target.closest('.amount-btn');
-            button.disabled = true;
-            button.textContent = '⏳ جاري...';
-
-            console.log('Sending invoice for user:', userId, 'amount:', amount);
-
-            fetch('/api/send-invoice', { 
-                method: 'POST', 
-                headers: { 'Content-Type': 'application/json' }, 
-                body: JSON.stringify({ user_id: userId, amount: amount })
-            })
-            .then(r => {
-                console.log('Response status:', r.status);
-                return r.json();
-            })
-            .then(data => {
-                console.log('Response data:', data);
-                if (data.success) {
-                    showMessage('✅ ' + data.message, 'success');
-                    setTimeout(() => {
-                        loadHome();
-                        button.disabled = false;
-                        button.textContent = '💛 ' + amount + ' ⭐';
-                    }, 2000);
-                } else {
-                    showMessage('❌ ' + (data.message || data.error || 'خطأ غير معروف'), 'error');
-                    button.disabled = false;
-                    button.textContent = '💛 ' + amount + ' ⭐';
-                }
-            })
-            .catch(err => {
-                console.error('Error:', err);
-                showMessage('❌ خطأ: ' + err.message, 'error');
-                button.disabled = false;
-                button.textContent = '💛 ' + amount + ' ⭐';
-            });
+        function sendDonation(amount) {
+            fetch('/api/send-invoice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, amount: amount }) })
+                .then(r => r.json()).then(d => {
+                    showMsg(d.message || d.error, d.success ? 'success' : 'error');
+                    statsCache = null;
+                }).catch(e => showMsg('خطأ اتصال', 'error'));
         }
 
-        function showMessage(text, type) {
-            let msg = document.createElement('div');
-            msg.className = `message ${type}`;
-            msg.textContent = text;
-            document.getElementById('messages').appendChild(msg);
-            setTimeout(() => msg.remove(), 3000);
+        function showMsg(text, type) {
+            let m = document.createElement('div');
+            m.className = `message ${type}`;
+            m.textContent = text;
+            document.getElementById('messages').appendChild(m);
+            setTimeout(() => m.remove(), 3000);
         }
 
         loadHome();
@@ -1292,11 +1173,13 @@ def site_home():
     return make_response(HTML_TEMPLATE, 200, {'Content-Type': 'text/html; charset=utf-8'})
 
 
-# ───────────────────────── تفعيل الويب هوك ─────────────────────────
+# ───────────────────────── تفعيل ─────────────────────────
+
 def set_webhook():
+    """تفعيل الويب هوك"""
     domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     if not domain or not BOT_TOKEN:
-        print("⚠️ RAILWAY_PUBLIC_DOMAIN أو BOT_TOKEN غير موجودين")
+        print("⚠️ بيانات الـ Webhook ناقصة")
         return
     url = f"https://{domain}/webhook/{BOT_TOKEN}"
     try:
