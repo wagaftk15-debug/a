@@ -1,4 +1,6 @@
-flask==3.0.3
-requests==2.32.3
-gunicorn==22.0.0
-psycopg2-binary>=2.9.10
+Flask==2.3.0
+requests==2.31.0
+psycopg2-binary==2.9.7
+gunicorn==21.2.0
+python-dotenv==1.0.0
+
