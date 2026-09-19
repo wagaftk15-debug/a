@@ -3,13 +3,11 @@ import json
 import requests
 import psycopg2
 from psycopg2 import pool
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 from threading import Lock
 import time
-import gzip
 import logging
-from io import BytesIO
 from collections import defaultdict
 
 # ───────────────────────── إعدادات اللوجينج ─────────────────────────
@@ -27,12 +25,10 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
-APP_URL = os.environ.get("APP_URL", "").rstrip("/")
-RAILWAY_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
 
 DONATION_AMOUNTS = [100, 200, 500, 1000, 2000]
 DAILY_POINTS = 100
-REFERRAL_POINTS = 50           # نقاط الإحالة
+REFERRAL_POINTS = 50
 
 # مستويات المهور
 MAHR_LEVELS = [
@@ -56,19 +52,17 @@ cache_lock = Lock()
 CACHE_TTL = {
     'stats': 30,
     'leaderboard': 45,
-    'user_points': 10,
+    'user_mahr': 10,
     'count': 40,
     'donations_stats': 30,
-    'mahr_stats': 40,
 }
 
-# Rate limiting بسيط (في الذاكرة)
 rate_limit = defaultdict(list)
 rate_lock = Lock()
-RATE_LIMIT_WINDOW = 60      # ثانية
-RATE_LIMIT_MAX = 25         # طلبات
+RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_MAX = 25
 
-# حالات المستخدمات (waiting mahr input)
+# حالات المستخدمات
 user_states = {}
 state_lock = Lock()
 
@@ -83,13 +77,6 @@ def check_rate_limit(key: str) -> bool:
         return True
 
 # ───────────────────────── دوال مساعدة ─────────────────────────
-def get_site_url():
-    if APP_URL:
-        return APP_URL
-    if RAILWAY_DOMAIN:
-        return f"https://{RAILWAY_DOMAIN}"
-    return ""
-
 def get_mahr_level(amount: int) -> str:
     level_name = MAHR_LEVELS[0][1]
     for threshold, name in MAHR_LEVELS:
@@ -228,27 +215,11 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS contacts_sent (
-                id SERIAL PRIMARY KEY,
-                sender_id BIGINT NOT NULL,
-                recipient_id BIGINT NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_points (
-                user_id BIGINT PRIMARY KEY,
-                total_points INTEGER NOT NULL DEFAULT 0,
-                last_claim_date DATE
-            )
-        """)
 
         # Indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mahr_amount ON mahr_requirements(mahr_amount DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_registrations_created ON registrations(created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_donations_user ON donations(user_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_contacts_sent ON contacts_sent(sender_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_women_referred ON women(referred_by)")
 
         conn.commit()
@@ -335,11 +306,8 @@ def register_woman(user_id, referred_by=None):
 
         if added:
             clear_cache('count')
-            clear_cache('stats')
-            # إعطاء نقاط للإحالة
             if referred_by and referred_by != user_id:
-                add_points(referred_by, REFERRAL_POINTS)
-                send_message(referred_by, f"🎉 حصلت على <b>{REFERRAL_POINTS}</b> نقطة إحالة من أختك الجديدة!")
+                send_message(referred_by, f"🎉 انضمت أختك الجديدة! حصلتِ على <b>{REFERRAL_POINTS}</b> نقطة إحالة!")
         return added
     except Exception as e:
         logger.error(f"register_woman error: {e}")
@@ -360,7 +328,6 @@ def unregister_woman(user_id):
         cur.close()
         if removed:
             clear_cache('count')
-            clear_cache('stats')
         return removed
     except Exception as e:
         logger.error(f"unregister_woman error: {e}")
@@ -386,7 +353,6 @@ def set_mahr(user_id, amount, notes=None):
         """, (user_id, amount, notes[:500] if notes else None))
         conn.commit()
         cur.close()
-        clear_cache('mahr_stats')
         clear_cache('leaderboard')
         return True
     except Exception as e:
@@ -415,7 +381,7 @@ def get_mahr(user_id):
         return_connection(conn)
 
 def get_leaderboard(limit=10):
-    """الحصول على قائمة النساء المسجلات مع متطلبات المهر"""
+    """الحصول على قائمة النساء مع متطلبات المهر"""
     cached = get_cache('leaderboard')
     if cached is not None:
         return cached
@@ -455,56 +421,6 @@ def get_leaderboard(limit=10):
     finally:
         return_connection(conn)
 
-# ───────────────────────── Points ─────────────────────────
-def add_points(user_id, amount):
-    if not user_id or amount <= 0:
-        return 0
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO user_points (user_id, total_points)
-            VALUES (%s, %s)
-            ON CONFLICT (user_id) DO UPDATE
-            SET total_points = user_points.total_points + %s
-            RETURNING total_points
-        """, (user_id, amount, amount))
-        row = cur.fetchone()
-        conn.commit()
-        cur.close()
-        points = row[0] if row else 0
-        clear_cache(f'user_points_{user_id}')
-        return points
-    except Exception as e:
-        logger.error(f"add_points error: {e}")
-        return 0
-    finally:
-        return_connection(conn)
-
-def get_user_points(user_id):
-    if not user_id:
-        return 0
-    key = f'user_points_{user_id}'
-    cached = get_cache(key)
-    if cached is not None:
-        return cached
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT total_points FROM user_points WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        cur.close()
-        points = row[0] if row else 0
-        set_cache(key, points)
-        return points
-    except Exception as e:
-        logger.error(f"get_user_points error: {e}")
-        return 0
-    finally:
-        return_connection(conn)
-
 # ───────────────────────── Donations ─────────────────────────
 def record_donation(user_id, amount, charge_id):
     if not user_id or amount <= 0:
@@ -523,7 +439,6 @@ def record_donation(user_id, amount, charge_id):
         cur.close()
         if added:
             clear_cache('donations_stats')
-            clear_cache('stats')
         return added
     except Exception as e:
         logger.error(f"record_donation error: {e}")
@@ -597,7 +512,6 @@ def send_invoice(chat_id, amount, title, description, payload_str):
         r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=REQUEST_TIMEOUT)
         result = r.json()
         if not result.get('ok'):
-            logger.error(f"Invoice error: {result.get('description')}")
             send_message(chat_id, "⚠️ حصل خطأ في إنشاء الفاتورة، جرب مرة ثانية.")
             return False
         return True
@@ -616,7 +530,6 @@ def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
 
 # ───────────────────────── Keyboards ─────────────────────────
 def main_keyboard():
-    site = get_site_url()
     keyboard = [
         [{"text": "✅ تسجيل رغبتي بالزواج", "callback_data": "want_marry"}],
         [
@@ -627,10 +540,8 @@ def main_keyboard():
             {"text": "⭐ دعم البوت", "callback_data": "show_donate"},
             {"text": "❓ المساعدة", "callback_data": "help"},
         ],
+        [{"text": "❌ إلغاء التسجيل", "callback_data": "unsubscribe"}]
     ]
-    if site:
-        keyboard.append([{"text": "💻 الموقع", "web_app": {"url": site}}])
-    keyboard.append([{"text": "❌ إلغاء التسجيل", "callback_data": "unsubscribe"}])
     return {"inline_keyboard": keyboard}
 
 def donation_keyboard():
@@ -713,7 +624,7 @@ def webhook():
 
         if state == "waiting_mahr" and text and not text.startswith("/"):
             try:
-                # محاولة استخراج المبلغ من الرسالة
+                # استخراج المبلغ من الرسالة
                 mahr_amount = int(''.join(filter(str.isdigit, text.split()[0])))
                 mahr_notes = text[len(str(mahr_amount)):].strip() or None
                 
@@ -724,13 +635,13 @@ def webhook():
                     if success:
                         level = get_mahr_level(mahr_amount)
                         send_message(chat_id, f"✅ تم تسجيل متطلبات المهر بنجاح!\n\n💍 المبلغ: <b>{mahr_amount:,}</b>\n📍 المستوى: {level}\n\nيمكن للأخوات البحث عنك الآن 💕")
-                        notify_admin(f"💍 تحديث مهر\nالمستخدمة: {user_id}\nالمبلغ: {mahr_amount:,}\nملاحظات: {mahr_notes or 'بلا'}")
+                        notify_admin(f"💍 تحديث مهر\nالمستخدمة: {user_id}\nالمبلغ: {mahr_amount:,}")
                     else:
                         send_message(chat_id, "❌ حصل خطأ أثناء التسجيل.")
                 else:
                     send_message(chat_id, "❌ يجب إدخال رقم صحيح")
             except:
-                send_message(chat_id, "❌ صيغة خاطئة. أدخلي الرقم بشكل صحيح مثل: 5000\nأو مع ملاحظات: 5000 بلاش إذا كنت شايفة في")
+                send_message(chat_id, "❌ صيغة خاطئة. أدخلي الرقم بشكل صحيح مثل: 5000")
             return jsonify({"ok": True})
 
         # أوامر
@@ -749,10 +660,10 @@ def webhook():
                 "👋 أهلاً وسهلاً بك في <b>بوت نساء الزواج</b> 💍\n\n"
                 "هنا تقدري تسجلي رغبتك بالزواج وتحددي متطلبات المهر الخاص بك.\n\n"
                 "🌟 المميزات:\n"
-                "✨ عرض ملفك لآلاف الأخوات\n"
-                "💍 تحديد مهرك بكل وضوح\n"
-                "📊 قائمة متطلبات المهور المختلفة\n"
-                "🤝 دعم المشروع بالتبرع\n\n"
+                "✨ تسجيل آمن وسهل\n"
+                "💍 تحديد المهر بوضوح\n"
+                "📊 البحث عن الشريك المناسب\n"
+                "🤝 مجتمع آمن وملتزم\n\n"
                 "اختاري من القائمة:",
                 main_keyboard()
             )
@@ -797,7 +708,7 @@ def webhook():
                 f"• المسجلات: {count}\n"
                 f"• عدد التبرعات: {d_count}\n"
                 f"• مجموع النجوم: {d_total}⭐\n"
-                f"• أعلى مهور: {', '.join([str(u['mahr_amount']) for u in top]) if top else 'لا توجد بيانات'}"
+                f"• أعلى مهور: {', '.join([f'{u[\"mahr_amount\"]:,}' for u in top]) if top else 'لا توجد بيانات'}"
             )
 
         elif text == "/clearcache" and str(user_id) == str(ADMIN_CHAT_ID):
@@ -844,7 +755,7 @@ def webhook():
                 "❓ <b>معلومات عن البوت</b>\n\n"
                 "البوت يساعدك على:\n"
                 "✨ تسجيل رغبتك بالزواج\n"
-                "💍 تحديد متطلبات مهرك بوضوح\n"
+                "💍 تحديد متطلبات مهرك\n"
                 "📊 رؤية ملفات الأخوات الأخريات\n"
                 "🤝 دعم المشروع\n\n"
                 "الأوامر المتاحة:\n"
@@ -914,63 +825,7 @@ def webhook():
 
     return jsonify({"ok": True})
 
-# ───────────────────────── API ─────────────────────────
-@app.route("/api/stats", methods=["GET"])
-def api_stats():
-    try:
-        cached = get_cache('stats')
-        if cached is not None:
-            return jsonify(cached)
-
-        count = get_count()
-        donations_count, donations_total = get_donations_stats()
-        leaderboard = get_leaderboard(15)
-
-        result = {
-            "registered": count,
-            "donations_count": donations_count,
-            "donations_total": donations_total,
-            "leaderboard": leaderboard,
-        }
-        set_cache('stats', result)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)[:80]}), 500
-
-@app.route("/api/woman/info", methods=["POST"])
-def api_woman_info():
-    data = request.get_json() or {}
-    user_id = data.get("user_id")
-    if not user_id:
-        return jsonify({"error": "missing user_id"}), 400
-    try:
-        mahr_amount, mahr_notes = get_mahr(user_id)
-        return jsonify({
-            "user_id": user_id,
-            "is_registered": is_registered(user_id),
-            "mahr_amount": mahr_amount,
-            "mahr_level": get_mahr_level(mahr_amount),
-            "mahr_notes": mahr_notes,
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)[:80]}), 500
-
-@app.route("/api/register", methods=["POST"])
-def api_register():
-    data = request.get_json() or {}
-    user_id = data.get("user_id")
-    if not user_id:
-        return jsonify({"error": "missing"}), 400
-    try:
-        result = register_woman(user_id)
-        return jsonify({
-            "success": result,
-            "message": "✅ تم التسجيل!" if result else "مسجلة مسبقاً",
-            "count": get_count()
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)[:80]}), 500
-
+# ───────────────────────── Health Check ─────────────────────────
 @app.route("/health")
 def health():
     return jsonify({
@@ -978,293 +833,6 @@ def health():
         "time": datetime.now().isoformat(),
         "registered": get_count()
     })
-
-# ───────────────────────── WebApp ─────────────────────────
-HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>💍 نساء الزواج</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(160deg, #1a0f2e 0%, #2d1b4e 100%);
-            color: #f1f5f9;
-            min-height: 100vh;
-            padding: 16px;
-        }
-        .container { max-width: 420px; margin: 0 auto; }
-        .header { text-align: center; padding: 20px 0 10px; }
-        .logo { font-size: 48px; margin-bottom: 6px; }
-        h1 {
-            font-size: 24px;
-            background: linear-gradient(90deg, #ff1493, #db69d6);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .card {
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255, 20, 147, 0.2);
-            border-radius: 16px;
-            padding: 18px;
-            margin-bottom: 14px;
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-bottom: 16px;
-        }
-        .stat-box {
-            background: rgba(255, 20, 147, 0.1);
-            border: 1px solid rgba(255, 20, 147, 0.2);
-            border-radius: 12px;
-            padding: 14px;
-            text-align: center;
-        }
-        .stat-value { font-size: 22px; font-weight: 700; color: #ff1493; }
-        .stat-label { font-size: 12px; opacity: 0.7; margin-top: 4px; }
-        .btn {
-            display: block;
-            width: 100%;
-            padding: 14px;
-            border: none;
-            border-radius: 12px;
-            font-size: 15px;
-            font-weight: 600;
-            cursor: pointer;
-            margin-bottom: 10px;
-            transition: 0.2s;
-        }
-        .btn-primary {
-            background: linear-gradient(90deg, #ff1493, #db69d6);
-            color: white;
-        }
-        .btn-secondary {
-            background: rgba(255, 20, 147, 0.1);
-            color: #ffc0cb;
-            border: 1px solid rgba(255, 20, 147, 0.3);
-        }
-        .btn:active { transform: scale(0.98); }
-        .leaderboard-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 12px;
-            margin-bottom: 8px;
-            background: rgba(255, 20, 147, 0.08);
-            border-radius: 10px;
-            font-size: 14px;
-        }
-        .user-info {
-            text-align: center;
-            margin: 12px 0;
-            font-size: 14px;
-            opacity: 0.9;
-            background: rgba(255, 20, 147, 0.1);
-            padding: 10px;
-            border-radius: 8px;
-        }
-        .tabs {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 16px;
-        }
-        .tab {
-            flex: 1;
-            padding: 10px;
-            text-align: center;
-            background: rgba(255,255,255,0.05);
-            border-radius: 10px;
-            font-size: 13px;
-            cursor: pointer;
-        }
-        .tab.active {
-            background: linear-gradient(90deg, #ff1493, #db69d6);
-        }
-        .section { display: none; }
-        .section.active { display: block; }
-        .loading { text-align: center; padding: 30px; opacity: 0.6; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <div class="logo">💍</div>
-            <h1>نساء الزواج</h1>
-        </div>
-
-        <div class="user-info" id="userInfo">جاري التحميل...</div>
-
-        <div class="stats" id="statsBox">
-            <div class="stat-box">
-                <div class="stat-value" id="regCount">-</div>
-                <div class="stat-label">أخت مسجلة</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-value" id="donTotal">-</div>
-                <div class="stat-label">نجوم الدعم</div>
-            </div>
-        </div>
-
-        <div class="tabs">
-            <div class="tab active" onclick="showSection('home')">الرئيسية</div>
-            <div class="tab" onclick="showSection('leaderboard')">المهور</div>
-            <div class="tab" onclick="showSection('donate')">الدعم</div>
-        </div>
-
-        <div id="home" class="section active">
-            <div class="card">
-                <button class="btn btn-primary" onclick="doRegister()">✅ تسجيل رغبتي</button>
-                <button class="btn btn-secondary" onclick="setMahr()">💍 تحديد المهر</button>
-                <button class="btn btn-secondary" onclick="Telegram.WebApp.close()">إغلاق</button>
-            </div>
-        </div>
-
-        <div id="leaderboard" class="section">
-            <div class="card" id="lbContent">
-                <div class="loading">جاري تحميل قائمة المهور...</div>
-            </div>
-        </div>
-
-        <div id="donate" class="section">
-            <div class="card">
-                <p style="text-align:center; margin-bottom:14px; opacity:0.8;">ادعمي المشروع بنجوم تيليجرام ⭐</p>
-                <button class="btn btn-primary" onclick="openBotDonate()">فتح خيارات الدعم في البوت</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const tg = window.Telegram.WebApp;
-        tg.expand();
-        tg.ready();
-
-        let userId = null;
-        try {
-            userId = tg.initDataUnsafe?.user?.id || null;
-        } catch(e) {}
-
-        function showSection(id) {
-            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.getElementById(id).classList.add('active');
-            event.target.classList.add('active');
-            if (id === 'leaderboard') loadLeaderboard();
-        }
-
-        async function loadStats() {
-            try {
-                const res = await fetch('/api/stats');
-                const data = await res.json();
-                document.getElementById('regCount').textContent = data.registered || 0;
-                document.getElementById('donTotal').textContent = (data.donations_total || 0) + '⭐';
-            } catch(e) {}
-        }
-
-        async function loadUser() {
-            if (!userId) {
-                document.getElementById('userInfo').textContent = 'افتحي التطبيق من داخل تيليجرام';
-                return;
-            }
-            try {
-                const res = await fetch('/api/woman/info', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({user_id: userId})
-                });
-                const data = await res.json();
-                const status = data.is_registered ? '✅ مسجلة' : '❌ غير مسجلة';
-                const mahr = data.mahr_amount ? `💍 ${data.mahr_amount.toLocaleString('ar-SA')}` : '❌ لم تحددي';
-                document.getElementById('userInfo').innerHTML = `${status} | ${mahr}`;
-            } catch(e) {
-                document.getElementById('userInfo').textContent = 'تعذر تحميل بياناتك';
-            }
-        }
-
-        async function doRegister() {
-            if (!userId) return tg.showAlert('يجب فتح الصفحة من داخل تيليجرام');
-            try {
-                const res = await fetch('/api/register', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({user_id: userId})
-                });
-                const data = await res.json();
-                tg.showAlert(data.message || 'تم');
-                loadStats();
-                loadUser();
-            } catch(e) {
-                tg.showAlert('حدث خطأ');
-            }
-        }
-
-        function setMahr() {
-            tg.showAlert('استخدمي الأمر /set_mahr في البوت لتحديد متطلبات المهر');
-        }
-
-        async function loadLeaderboard() {
-            const box = document.getElementById('lbContent');
-            try {
-                const res = await fetch('/api/stats');
-                const data = await res.json();
-                const list = data.leaderboard || [];
-                if (!list.length) {
-                    box.innerHTML = '<div class="loading">لا توجد متطلبات مهور بعد</div>';
-                    return;
-                }
-                let html = '';
-                list.forEach((u, i) => {
-                    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i+1) + '.';
-                    const notes = u.mahr_notes ? `<br><small>${u.mahr_notes}</small>` : '';
-                    html += `<div class="leaderboard-item">
-                        <div>
-                            <span>${medal} ${u.name}</span>
-                            ${notes}
-                        </div>
-                        <span><b>${u.mahr_amount.toLocaleString('ar-SA')}</b> 💍</span>
-                    </div>`;
-                });
-                box.innerHTML = html;
-            } catch(e) {
-                box.innerHTML = '<div class="loading">فشل التحميل</div>';
-            }
-        }
-
-        function openBotDonate() {
-            tg.close();
-        }
-
-        loadStats();
-        loadUser();
-    </script>
-</body>
-</html>
-"""
-
-@app.route("/")
-def index():
-    return HTML_TEMPLATE
-
-# ───────────────────────── Gzip ─────────────────────────
-@app.after_request
-def gzip_response(response):
-    if response.content_length and response.content_length < 600:
-        return response
-    accept = request.headers.get('Accept-Encoding', '')
-    if 'gzip' in accept and 'gzip' not in response.headers.get('Content-Encoding', ''):
-        try:
-            buf = BytesIO()
-            with gzip.GzipFile(mode='wb', fileobj=buf) as gz:
-                gz.write(response.get_data())
-            response.set_data(buf.getvalue())
-            response.headers['Content-Encoding'] = 'gzip'
-            response.headers['Content-Length'] = len(response.get_data())
-        except:
-            pass
-    return response
 
 # ───────────────────────── تشغيل ─────────────────────────
 if __name__ == "__main__":
