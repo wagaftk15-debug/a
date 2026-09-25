@@ -10,7 +10,7 @@ import time
 import logging
 from collections import defaultdict
 
-# ───────────────────────── إعدادات اللوجينج ─────────────────────────
+# ───────────────────────── Logging setup ─────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
@@ -20,16 +20,16 @@ logger = logging.getLogger("StarTonBot")
 
 app = Flask(__name__)
 
-# ───────────────────────── الإعدادات ─────────────────────────
+# ───────────────────────── Config ─────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
-# سعر الصرف: 1000 نجمة = 1 TON
+# Exchange rate: 1000 Stars = 1 TON
 STARS_PER_TON = 1000
-MIN_EXCHANGE_STARS = 100          # أقل عدد نجوم مسموح بتبديله
-MAX_EXCHANGE_STARS = 1_000_000    # أعلى عدد نجوم مسموح بتبديله في الطلب الواحد
+MIN_EXCHANGE_STARS = 100          # minimum stars allowed per request
+MAX_EXCHANGE_STARS = 1_000_000    # maximum stars allowed per single request
 
 EXCHANGE_AMOUNTS = [1000, 2000, 5000, 10000, 20000]
 
@@ -54,18 +54,19 @@ rate_lock = Lock()
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX = 25
 
-# حالة المستخدم أثناء تعبئة طلب التبديل (بالذاكرة)
+# In-memory state while a user is filling out an exchange request
 # user_states[user_id] = "waiting_wallet" | "waiting_stars_custom"
 user_states = {}
 state_lock = Lock()
 
-# تخزين مؤقت لعنوان المحفظة بين خطوة إدخال العنوان وخطوة اختيار المبلغ
+# Temporary storage for a wallet address between the "enter wallet" step
+# and the "choose amount" step
 pending_wallet = {}
 wallet_lock = Lock()
 
 
 def check_rate_limit(key: str) -> bool:
-    """يرجع True إذا مسموح بالطلب"""
+    """Returns True if the request is allowed"""
     now = time.time()
     with rate_lock:
         rate_limit[key] = [t for t in rate_limit[key] if now - t < RATE_LIMIT_WINDOW]
@@ -75,7 +76,7 @@ def check_rate_limit(key: str) -> bool:
         return True
 
 
-# ───────────────────────── دوال مساعدة ─────────────────────────
+# ───────────────────────── Helpers ─────────────────────────
 def stars_to_ton(stars: int) -> float:
     return round(stars / STARS_PER_TON, 4)
 
@@ -85,7 +86,7 @@ def format_ton(amount: float) -> str:
 
 
 def is_valid_wallet(address: str) -> bool:
-    """تحقق بسيط من شكل عنوان محفظة TON (لا يضمن صحتها الفعلية)"""
+    """Basic sanity check on the shape of a TON wallet address (does not guarantee validity)"""
     if not address:
         return False
     address = address.strip()
@@ -105,11 +106,11 @@ def mask_name(name: str) -> str:
 
 def status_label(status: str) -> str:
     return {
-        "pending": "⏳ بانتظار المراجعة",
-        "accepted": "✅ تم القبول - بانتظار الدفع",
-        "rejected": "❌ مرفوض",
-        "paid": "💰 تم الدفع - بانتظار تحويل TON",
-        "completed": "🎉 مكتمل",
+        "pending": "⏳ Awaiting review",
+        "accepted": "✅ Accepted - awaiting payment",
+        "rejected": "❌ Rejected",
+        "paid": "💰 Paid - awaiting TON transfer",
+        "completed": "🎉 Completed",
     }.get(status, status)
 
 
@@ -117,7 +118,7 @@ def status_label(status: str) -> str:
 def init_pool():
     global db_pool
     if not DATABASE_URL:
-        logger.error("DATABASE_URL غير موجود")
+        logger.error("DATABASE_URL not set")
         return False
     try:
         with pool_lock:
@@ -131,10 +132,10 @@ def init_pool():
                 keepalives_interval=10,
                 keepalives_count=5
             )
-        logger.info("✅ Connection Pool جاهز")
+        logger.info("✅ Connection pool ready")
         return True
     except Exception as e:
-        logger.error(f"❌ خطأ في Pool: {e}")
+        logger.error(f"❌ Pool error: {e}")
         return False
 
 
@@ -142,14 +143,14 @@ def get_connection(retry=0):
     global db_pool
     if db_pool is None:
         if not init_pool():
-            raise Exception("فشل إنشاء Pool")
+            raise Exception("Failed to create pool")
     try:
         return db_pool.getconn()
     except Exception as e:
         if retry < MAX_RETRIES:
             time.sleep(RETRY_DELAY)
             return get_connection(retry + 1)
-        raise Exception(f"فشل الاتصال: {str(e)[:80]}")
+        raise Exception(f"Connection failed: {str(e)[:80]}")
 
 
 def return_connection(conn, close=False):
@@ -241,9 +242,9 @@ def init_db():
 
         conn.commit()
         cur.close()
-        logger.info("✅ قاعدة البيانات جاهزة")
+        logger.info("✅ Database ready")
     except Exception as e:
-        logger.error(f"❌ خطأ في DB: {e}")
+        logger.error(f"❌ DB error: {e}")
     finally:
         return_connection(conn)
 
@@ -476,7 +477,7 @@ def send_invoice(chat_id, amount, title, description, payload_str):
         r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=REQUEST_TIMEOUT)
         result = r.json()
         if not result.get('ok'):
-            send_message(chat_id, "⚠️ حصل خطأ في إنشاء فاتورة الدفع، جرب مرة ثانية.")
+            send_message(chat_id, "⚠️ Something went wrong creating the payment invoice, please try again.")
             return False
         return True
     except Exception as e:
@@ -503,9 +504,9 @@ def notify_admin(text, reply_markup=None):
 def main_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "🔄 تبديل نجوم بـ TON", "callback_data": "exchange_start"}],
-            [{"text": "📋 طلباتي", "callback_data": "my_requests"}],
-            [{"text": "❓ المساعدة", "callback_data": "help"}],
+            [{"text": "🔄 Exchange Stars for TON", "callback_data": "exchange_start"}],
+            [{"text": "📋 My Requests", "callback_data": "my_requests"}],
+            [{"text": "❓ Help", "callback_data": "help"}],
         ]
     }
 
@@ -514,9 +515,9 @@ def exchange_amount_keyboard():
     keyboard = []
     for amount in EXCHANGE_AMOUNTS:
         ton = format_ton(stars_to_ton(amount))
-        keyboard.append([{"text": f"⭐ {amount:,} ← {ton} TON", "callback_data": f"exchange_amt_{amount}"}])
-    keyboard.append([{"text": "📝 مبلغ مخصص", "callback_data": "exchange_custom"}])
-    keyboard.append([{"text": "🔙 رجوع", "callback_data": "back_main"}])
+        keyboard.append([{"text": f"⭐ {amount:,} → {ton} TON", "callback_data": f"exchange_amt_{amount}"}])
+    keyboard.append([{"text": "📝 Custom amount", "callback_data": "exchange_custom"}])
+    keyboard.append([{"text": "🔙 Back", "callback_data": "back_main"}])
     return {"inline_keyboard": keyboard}
 
 
@@ -524,8 +525,8 @@ def admin_decision_keyboard(request_id):
     return {
         "inline_keyboard": [
             [
-                {"text": "✅ قبول", "callback_data": f"exchange_accept_{request_id}"},
-                {"text": "❌ رفض", "callback_data": f"exchange_reject_{request_id}"},
+                {"text": "✅ Accept", "callback_data": f"exchange_accept_{request_id}"},
+                {"text": "❌ Reject", "callback_data": f"exchange_reject_{request_id}"},
             ]
         ]
     }
@@ -534,7 +535,7 @@ def admin_decision_keyboard(request_id):
 def admin_mark_done_keyboard(request_id):
     return {
         "inline_keyboard": [
-            [{"text": "✅ تم تحويل الـ TON", "callback_data": f"exchange_done_{request_id}"}]
+            [{"text": "✅ TON transferred", "callback_data": f"exchange_done_{request_id}"}]
         ]
     }
 
@@ -542,12 +543,12 @@ def admin_mark_done_keyboard(request_id):
 def build_my_requests_text(user_id):
     reqs = get_user_requests(user_id, 5)
     if not reqs:
-        return "لا توجد طلبات تبديل سابقة 🙂"
-    lines = ["📋 <b>آخر طلباتك:</b>\n"]
+        return "You have no previous exchange requests 🙂"
+    lines = ["📋 <b>Your recent requests:</b>\n"]
     for r in reqs:
         lines.append(
-            f"#{r['id']} • ⭐ {r['stars_amount']:,} ← {format_ton(r['ton_amount'])} TON\n"
-            f"الحالة: {status_label(r['status'])}"
+            f"#{r['id']} • ⭐ {r['stars_amount']:,} → {format_ton(r['ton_amount'])} TON\n"
+            f"Status: {status_label(r['status'])}"
         )
     return "\n\n".join(lines)
 
@@ -579,14 +580,14 @@ def pop_pending_wallet(user_id):
 # ───────────────────────── Exchange Flow ─────────────────────────
 def start_exchange_request(user_id, chat_id, stars_amount, wallet, callback_id=None):
     if stars_amount < MIN_EXCHANGE_STARS:
-        msg = f"❌ أقل عدد نجوم للتبديل هو {MIN_EXCHANGE_STARS:,} ⭐"
+        msg = f"❌ Minimum amount to exchange is {MIN_EXCHANGE_STARS:,} ⭐"
         if callback_id:
             answer_callback(callback_id, msg, show_alert=True)
         else:
             send_message(chat_id, msg)
         return
     if stars_amount > MAX_EXCHANGE_STARS:
-        msg = f"❌ أقصى عدد نجوم للتبديل هو {MAX_EXCHANGE_STARS:,} ⭐ لكل طلب"
+        msg = f"❌ Maximum amount per request is {MAX_EXCHANGE_STARS:,} ⭐"
         if callback_id:
             answer_callback(callback_id, msg, show_alert=True)
         else:
@@ -595,7 +596,7 @@ def start_exchange_request(user_id, chat_id, stars_amount, wallet, callback_id=N
 
     request_id = create_exchange_request(user_id, stars_amount, wallet)
     if not request_id:
-        msg = "⚠️ حصل خطأ أثناء إنشاء الطلب، حاول مرة ثانية."
+        msg = "⚠️ Something went wrong creating your request, please try again."
         if callback_id:
             answer_callback(callback_id, msg, show_alert=True)
         else:
@@ -604,25 +605,25 @@ def start_exchange_request(user_id, chat_id, stars_amount, wallet, callback_id=N
 
     ton_amount = stars_to_ton(stars_amount)
     if callback_id:
-        answer_callback(callback_id, "✅ تم إرسال طلبك")
+        answer_callback(callback_id, "✅ Your request has been submitted")
 
     send_message(
         chat_id,
-        f"✅ تم استلام طلب التبديل رقم <b>#{request_id}</b>\n\n"
-        f"⭐ النجوم: <b>{stars_amount:,}</b>\n"
-        f"💎 مقابل: <b>{format_ton(ton_amount)} TON</b>\n"
-        f"👛 المحفظة: <code>{wallet}</code>\n\n"
-        f"⏳ طلبك الآن قيد المراجعة من الإدارة، بنعلمك فور اتخاذ القرار."
+        f"✅ Exchange request <b>#{request_id}</b> received\n\n"
+        f"⭐ Stars: <b>{stars_amount:,}</b>\n"
+        f"💎 For: <b>{format_ton(ton_amount)} TON</b>\n"
+        f"👛 Wallet: <code>{wallet}</code>\n\n"
+        f"⏳ Your request is now awaiting admin review, we'll notify you once it's decided."
     )
 
     display_name = get_display_name(user_id)
     notify_admin(
-        f"🆕 <b>طلب تبديل جديد</b> #{request_id}\n\n"
-        f"👤 المستخدم: {display_name} (<code>{user_id}</code>)\n"
-        f"⭐ النجوم: <b>{stars_amount:,}</b>\n"
-        f"💎 يعادل: <b>{format_ton(ton_amount)} TON</b>\n"
-        f"👛 المحفظة: <code>{wallet}</code>\n\n"
-        f"اقبل أو ارفض الطلب:",
+        f"🆕 <b>New exchange request</b> #{request_id}\n\n"
+        f"👤 User: {display_name} (<code>{user_id}</code>)\n"
+        f"⭐ Stars: <b>{stars_amount:,}</b>\n"
+        f"💎 Equivalent: <b>{format_ton(ton_amount)} TON</b>\n"
+        f"👛 Wallet: <code>{wallet}</code>\n\n"
+        f"Accept or reject this request:",
         admin_decision_keyboard(request_id)
     )
 
@@ -635,7 +636,7 @@ def webhook():
 
     update = request.get_json(force=True, silent=True) or {}
 
-    # Pre-checkout: نوافق مباشرة دائماً (التحقق الفعلي تم قبل إرسال الفاتورة)
+    # Pre-checkout: always approve (real validation happens before the invoice is sent)
     if "pre_checkout_query" in update:
         pcq = update["pre_checkout_query"]
         answer_pre_checkout(pcq["id"], ok=True)
@@ -652,7 +653,7 @@ def webhook():
         if user_id:
             upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
-        # دفعة ناجحة (تحويل النجوم فعلياً)
+        # Successful payment (Stars actually charged)
         if "successful_payment" in msg:
             sp = msg["successful_payment"]
             amount = sp.get("total_amount", 0)
@@ -670,44 +671,44 @@ def webhook():
                     update_exchange_status(request_id, "paid", charge_id=charge_id)
                     send_message(
                         chat_id,
-                        f"💛 تم استلام <b>{amount:,}⭐</b> بنجاح لطلبك #{request_id}\n\n"
-                        f"سيتم تحويل <b>{format_ton(req['ton_amount'])} TON</b> إلى محفظتك خلال وقت قصير 🙏"
+                        f"💛 Successfully received <b>{amount:,}⭐</b> for request #{request_id}\n\n"
+                        f"<b>{format_ton(req['ton_amount'])} TON</b> will be sent to your wallet shortly 🙏"
                     )
                     display_name = get_display_name(user_id)
                     notify_admin(
-                        f"💰 <b>دفعة مستلمة</b> - طلب #{request_id}\n\n"
+                        f"💰 <b>Payment received</b> - request #{request_id}\n\n"
                         f"👤 {display_name} (<code>{user_id}</code>)\n"
-                        f"⭐ {amount:,} تم استلامها\n"
-                        f"👛 حوّل <b>{format_ton(req['ton_amount'])} TON</b> إلى:\n<code>{req['ton_wallet']}</code>",
+                        f"⭐ {amount:,} received\n"
+                        f"👛 Send <b>{format_ton(req['ton_amount'])} TON</b> to:\n<code>{req['ton_wallet']}</code>",
                         admin_mark_done_keyboard(request_id)
                     )
                 else:
                     logger.error(f"successful_payment: exchange request {request_id} not in expected state")
-                    send_message(chat_id, "⚠️ تم استلام الدفعة، لكن حصل خطأ بتحديث الطلب. تواصل مع الدعم رجاءً.")
+                    send_message(chat_id, "⚠️ Payment received, but something went wrong updating your request. Please contact support.")
             return jsonify({"ok": True})
 
-        # ───── حالة انتظار إدخال عنوان المحفظة ─────
+        # ───── Waiting for wallet address ─────
         state = get_state(user_id)
 
         if state == "waiting_wallet" and text and not text.startswith("/"):
             if not is_valid_wallet(text):
-                send_message(chat_id, "❌ عنوان المحفظة غير صحيح. تأكدي من نسخه بشكل صحيح من محفظتك (Tonkeeper, Tonhub...الخ) وأرسليه مرة ثانية.")
+                send_message(chat_id, "❌ Invalid wallet address. Make sure you copied it correctly from your wallet app (Tonkeeper, Tonhub, etc.) and send it again.")
                 return jsonify({"ok": True})
             set_pending_wallet(user_id, text)
             set_state(user_id, None)
-            send_message(chat_id, "👛 تم استلام عنوان المحفظة ✅\n\nالآن اختاري عدد النجوم التي تريدين تبديلها:", exchange_amount_keyboard())
+            send_message(chat_id, "👛 Wallet address received ✅\n\nNow choose how many stars you'd like to exchange:", exchange_amount_keyboard())
             return jsonify({"ok": True})
 
-        # ───── حالة انتظار إدخال مبلغ نجوم مخصص ─────
+        # ───── Waiting for custom stars amount ─────
         if state == "waiting_stars_custom" and text and not text.startswith("/"):
             wallet = pop_pending_wallet(user_id)
             if not wallet:
                 set_state(user_id, None)
-                send_message(chat_id, "⚠️ انتهت صلاحية الجلسة، ابدئي من جديد بالضغط على 🔄 تبديل نجوم بـ TON")
+                send_message(chat_id, "⚠️ Your session expired, please start again by tapping 🔄 Exchange Stars for TON")
                 return jsonify({"ok": True})
             digits = ''.join(filter(str.isdigit, text))
             if not digits:
-                send_message(chat_id, "❌ يجب إدخال رقم صحيح، مثال: 3000")
+                send_message(chat_id, "❌ Please enter a valid number, e.g. 3000")
                 set_pending_wallet(user_id, wallet)
                 return jsonify({"ok": True})
             stars_amount = int(digits)
@@ -715,49 +716,49 @@ def webhook():
             start_exchange_request(user_id, chat_id, stars_amount, wallet)
             return jsonify({"ok": True})
 
-        # ───── الأوامر ─────
+        # ───── Commands ─────
         if text.startswith("/start"):
             send_message(
                 chat_id,
-                "👋 أهلاً بك في <b>بوت تبديل النجوم بعملة TON</b> 💎\n\n"
-                f"💱 سعر الصرف الحالي: <b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
-                "طريقة العمل:\n"
-                "1️⃣ تقدّمي بطلب تبديل (نرسل لك عنوان محفظتك)\n"
-                "2️⃣ الإدارة تراجع الطلب وتقبله أو ترفضه\n"
-                "3️⃣ إذا تم القبول، تدفعي النجوم عبر تيليجرام\n"
-                "4️⃣ نحوّل لك مبلغ TON المقابل إلى محفظتك\n\n"
-                "اختاري من القائمة:",
+                "👋 Welcome to the <b>Stars ↔ TON Exchange Bot</b> 💎\n\n"
+                f"💱 Current exchange rate: <b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
+                "How it works:\n"
+                "1️⃣ Submit an exchange request (with your wallet address)\n"
+                "2️⃣ The admin reviews and either accepts or rejects it\n"
+                "3️⃣ If accepted, you pay the Stars through Telegram\n"
+                "4️⃣ We send the equivalent TON to your wallet\n\n"
+                "Choose an option below:",
                 main_keyboard()
             )
 
-        elif text in ("/طلباتي", "/requests", "/myrequests"):
+        elif text in ("/myrequests", "/requests"):
             send_message(chat_id, build_my_requests_text(user_id))
 
-        elif text in ("/مساعدة", "/help"):
+        elif text in ("/help",):
             send_message(
                 chat_id,
-                "❓ <b>عن البوت</b>\n\n"
-                f"يبدّل البوت نجوم تيليجرام مقابل عملة TON بسعر ثابت:\n"
+                "❓ <b>About this bot</b>\n\n"
+                f"This bot exchanges Telegram Stars for TON at a fixed rate:\n"
                 f"<b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
-                "كل طلب يمر بمراجعة يدوية من الإدارة قبل الدفع، وبعد الدفع "
-                "يتم تحويل الـ TON يدوياً إلى محفظتك.\n\n"
-                "الأوامر:\n"
-                "/start - القائمة الرئيسية\n"
-                "/طلباتي - عرض طلباتك السابقة"
+                "Every request goes through manual admin review before payment, and after "
+                "payment the TON is sent manually to your wallet.\n\n"
+                "Commands:\n"
+                "/start - Main menu\n"
+                "/myrequests - View your past requests"
             )
 
-        # أوامر الأدمن
+        # Admin commands
         elif text.startswith("/admin") and str(user_id) == str(ADMIN_CHAT_ID):
             stats = get_admin_stats()
-            lines = ["🛠 <b>لوحة الأدمن</b>\n"]
+            lines = ["🛠 <b>Admin Panel</b>\n"]
             for status_key in ("pending", "accepted", "paid", "completed", "rejected"):
                 s = stats.get(status_key, {"count": 0, "stars": 0, "ton": 0})
-                lines.append(f"{status_label(status_key)}: {s['count']} طلب / {s['stars']:,}⭐ / {format_ton(s['ton'])} TON")
+                lines.append(f"{status_label(status_key)}: {s['count']} requests / {s['stars']:,}⭐ / {format_ton(s['ton'])} TON")
             send_message(chat_id, "\n".join(lines))
 
         elif text == "/clearcache" and str(user_id) == str(ADMIN_CHAT_ID):
             clear_cache()
-            send_message(chat_id, "✅ تم مسح الـ Cache")
+            send_message(chat_id, "✅ Cache cleared")
 
     # ───────────── Callback Query ─────────────
     elif "callback_query" in update:
@@ -775,9 +776,9 @@ def webhook():
             set_state(user_id, "waiting_wallet")
             send_message(
                 chat_id,
-                "👛 أرسلي عنوان محفظة TON التي تريدين استلام العملة عليها\n\n"
-                "مثال: <code>UQAbCdEf...</code>\n\n"
-                "⚠️ تأكدي من صحة العنوان جيداً، البوت لا يتحمل مسؤولية تحويلات لعناوين خاطئة."
+                "👛 Send the TON wallet address you'd like to receive your funds on\n\n"
+                "Example: <code>UQAbCdEf...</code>\n\n"
+                "⚠️ Please double-check the address, the bot is not responsible for transfers to wrong addresses."
             )
 
         elif data_key == "my_requests":
@@ -788,93 +789,94 @@ def webhook():
             answer_callback(callback_id, "")
             send_message(
                 chat_id,
-                "❓ <b>عن البوت</b>\n\n"
-                f"يبدّل البوت نجوم تيليجرام مقابل TON بسعر ثابت: <b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
-                "كل طلب يمر بمراجعة يدوية قبل الدفع، وبعد الدفع تُحوَّل الـ TON يدوياً إلى محفظتك."
+                "❓ <b>About this bot</b>\n\n"
+                f"This bot exchanges Telegram Stars for TON at a fixed rate: <b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
+                "Every request goes through manual review before payment, and after payment "
+                "the TON is transferred manually to your wallet."
             )
 
         elif data_key == "back_main":
             answer_callback(callback_id, "")
-            send_message(chat_id, "القائمة الرئيسية:", main_keyboard())
+            send_message(chat_id, "Main menu:", main_keyboard())
 
         elif data_key == "exchange_custom":
             wallet = None
             with wallet_lock:
                 wallet = pending_wallet.get(user_id)
             if not wallet:
-                answer_callback(callback_id, "أدخلي عنوان المحفظة أولاً", show_alert=True)
+                answer_callback(callback_id, "Please enter your wallet address first", show_alert=True)
                 set_state(user_id, "waiting_wallet")
-                send_message(chat_id, "👛 أرسلي عنوان محفظة TON أولاً:")
+                send_message(chat_id, "👛 Please send your TON wallet address first:")
                 return jsonify({"ok": True})
             answer_callback(callback_id, "")
             set_state(user_id, "waiting_stars_custom")
-            send_message(chat_id, f"📝 اكتبي عدد النجوم التي تريدين تبديلها (بالأرقام فقط)\nالحد الأدنى: {MIN_EXCHANGE_STARS:,} ⭐")
+            send_message(chat_id, f"📝 Type the number of stars you'd like to exchange (digits only)\nMinimum: {MIN_EXCHANGE_STARS:,} ⭐")
 
         elif data_key.startswith("exchange_amt_"):
             wallet = pop_pending_wallet(user_id)
             if not wallet:
-                answer_callback(callback_id, "أدخلي عنوان المحفظة أولاً", show_alert=True)
+                answer_callback(callback_id, "Please enter your wallet address first", show_alert=True)
                 set_state(user_id, "waiting_wallet")
-                send_message(chat_id, "👛 أرسلي عنوان محفظة TON أولاً:")
+                send_message(chat_id, "👛 Please send your TON wallet address first:")
                 return jsonify({"ok": True})
             try:
                 amount = int(data_key.split("_")[2])
             except Exception:
-                answer_callback(callback_id, "خطأ", show_alert=True)
+                answer_callback(callback_id, "Error", show_alert=True)
                 return jsonify({"ok": True})
             start_exchange_request(user_id, chat_id, amount, wallet, callback_id=callback_id)
 
-        # ───── قرارات الأدمن ─────
+        # ───── Admin decisions ─────
         elif data_key.startswith("exchange_accept_") and str(user_id) == str(ADMIN_CHAT_ID):
             try:
                 request_id = int(data_key.split("_")[2])
             except Exception:
-                answer_callback(callback_id, "خطأ", show_alert=True)
+                answer_callback(callback_id, "Error", show_alert=True)
                 return jsonify({"ok": True})
             req = get_exchange_request(request_id)
             if not req or req["status"] != "pending":
-                answer_callback(callback_id, "الطلب غير متاح للقبول", show_alert=True)
+                answer_callback(callback_id, "This request can no longer be accepted", show_alert=True)
                 return jsonify({"ok": True})
             update_exchange_status(request_id, "accepted")
             sent = send_invoice(
                 req["user_id"], req["stars_amount"],
-                f"تبديل {req['stars_amount']}⭐",
-                f"مقابل {format_ton(req['ton_amount'])} TON",
+                f"Exchange {req['stars_amount']}⭐",
+                f"For {format_ton(req['ton_amount'])} TON",
                 f"exchange_{request_id}"
             )
             if sent:
-                answer_callback(callback_id, "✅ تم القبول وإرسال فاتورة الدفع للمستخدم")
-                send_message(req["user_id"], f"✅ تم قبول طلبك #{request_id}!\nسيصلك الآن طلب دفع {req['stars_amount']:,}⭐، أكملي الدفع لإتمام التبديل.")
+                answer_callback(callback_id, "✅ Accepted, payment invoice sent to the user")
+                send_message(req["user_id"], f"✅ Your request #{request_id} was accepted!\nYou'll now receive a payment request for {req['stars_amount']:,}⭐, complete it to finish the exchange.")
             else:
-                answer_callback(callback_id, "تم القبول لكن فشل إرسال فاتورة الدفع", show_alert=True)
+                answer_callback(callback_id, "Accepted, but sending the invoice failed", show_alert=True)
 
         elif data_key.startswith("exchange_reject_") and str(user_id) == str(ADMIN_CHAT_ID):
             try:
                 request_id = int(data_key.split("_")[2])
             except Exception:
-                answer_callback(callback_id, "خطأ", show_alert=True)
+                answer_callback(callback_id, "Error", show_alert=True)
                 return jsonify({"ok": True})
             req = get_exchange_request(request_id)
             if not req or req["status"] != "pending":
-                answer_callback(callback_id, "الطلب غير متاح للرفض", show_alert=True)
+                answer_callback(callback_id, "This request can no longer be rejected", show_alert=True)
                 return jsonify({"ok": True})
             update_exchange_status(request_id, "rejected")
-            answer_callback(callback_id, "❌ تم رفض الطلب")
-            send_message(req["user_id"], f"❌ نعتذر، تم رفض طلب التبديل #{request_id}.\nيمكنك تقديم طلب جديد إذا رغبتِ.")
+            answer_callback(callback_id, "❌ Request rejected")
+            send_message(req["user_id"], f"❌ Sorry, your exchange request #{request_id} was rejected.\nYou're welcome to submit a new one if you'd like.")
 
         elif data_key.startswith("exchange_done_") and str(user_id) == str(ADMIN_CHAT_ID):
             try:
                 request_id = int(data_key.split("_")[2])
             except Exception:
-                answer_callback(callback_id, "خطأ", show_alert=True)
+                answer_callback(callback_id, "Error", show_alert=True)
                 return jsonify({"ok": True})
             req = get_exchange_request(request_id)
             if not req or req["status"] != "paid":
-                answer_callback(callback_id, "الطلب غير متاح للإكمال", show_alert=True)
+                answer_callback(callback_id, "This request cannot be completed right now", show_alert=True)
                 return jsonify({"ok": True})
             update_exchange_status(request_id, "completed", touch_completed=True)
-            answer_callback(callback_id, "✅ تم تعليم الطلب كمكتمل")
-            send_message(req["user_id"], f"🎉 تم تحويل <b>{format_ton(req['ton_amount'])} TON</b> إلى محفظتك بنجاح!\nشكراً لاستخدامك البوت 💎")
+            answer_callback(callback_id, "✅ Marked as completed")
+            send_message(req["user_id"], f"🎉 <b>{format_ton(req['ton_amount'])} TON</b> has been sent to your wallet!\nThanks for using the bot 💎")
 
     return jsonify({"ok": True})
 
@@ -889,9 +891,9 @@ def health():
     })
 
 
-# ───────────────────────── تشغيل ─────────────────────────
+# ───────────────────────── Run ─────────────────────────
 if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 البوت شغال على المنفذ {port}")
+    logger.info(f"🚀 Bot running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
