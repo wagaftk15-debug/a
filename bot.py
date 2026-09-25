@@ -26,6 +26,19 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
+# Public base URL of this deployment, e.g. https://your-app.up.railway.app
+# On Railway, set this to the value shown under Settings -> Networking -> Public Domain
+# (or leave PUBLIC_URL unset and instead set RAILWAY_PUBLIC_DOMAIN, which Railway
+# injects automatically when a public domain is generated).
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+if not PUBLIC_URL and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
+    PUBLIC_URL = f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}"
+
+# Optional shared secret Telegram will echo back on every webhook call, so we can
+# reject requests that don't come from Telegram. Set the same value in both
+# WEBHOOK_SECRET and when calling setWebhook (done automatically below).
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+
 # Exchange rate: 1000 Stars = 1 TON
 STARS_PER_TON = 1000
 MIN_EXCHANGE_STARS = 100          # minimum stars allowed per request
@@ -500,6 +513,36 @@ def notify_admin(text, reply_markup=None):
         send_message(ADMIN_CHAT_ID, text, reply_markup)
 
 
+def set_webhook():
+    """Registers our webhook URL with Telegram so updates actually get delivered here.
+    Without this call, the server can run perfectly fine and still never receive anything."""
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN is not set - cannot register webhook")
+        return False
+    if not PUBLIC_URL:
+        logger.warning(
+            "⚠️ PUBLIC_URL / RAILWAY_PUBLIC_DOMAIN is not set - skipping automatic "
+            "setWebhook call. The bot will NOT receive updates until the webhook is "
+            "registered manually (see /set_webhook_info or Telegram's setWebhook API)."
+        )
+        return False
+    webhook_url = f"{PUBLIC_URL}/webhook/{BOT_TOKEN}"
+    try:
+        payload = {"url": webhook_url, "allowed_updates": ["message", "callback_query", "pre_checkout_query"]}
+        if WEBHOOK_SECRET:
+            payload["secret_token"] = WEBHOOK_SECRET
+        r = requests.post(f"{TELEGRAM_API}/setWebhook", json=payload, timeout=REQUEST_TIMEOUT)
+        result = r.json()
+        if result.get("ok"):
+            logger.info(f"✅ Webhook registered: {webhook_url}")
+            return True
+        logger.error(f"❌ setWebhook failed: {result}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ setWebhook error: {e}")
+        return False
+
+
 # ───────────────────────── Keyboards ─────────────────────────
 def main_keyboard():
     return {
@@ -631,10 +674,15 @@ def start_exchange_request(user_id, chat_id, stars_amount, wallet, callback_id=N
 # ───────────────────────── Webhook ─────────────────────────
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
+    if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        logger.warning("⚠️ Webhook call rejected: bad or missing secret token")
+        return jsonify({"ok": False}), 403
+
     if not check_rate_limit("webhook"):
         return jsonify({"ok": True}), 429
 
     update = request.get_json(force=True, silent=True) or {}
+    logger.info(f"📩 Update received: {json.dumps(update)[:300]}")
 
     # Pre-checkout: always approve (real validation happens before the invoice is sent)
     if "pre_checkout_query" in update:
@@ -887,13 +935,39 @@ def health():
     return jsonify({
         "status": "ok",
         "time": datetime.now().isoformat(),
-        "rate": f"{STARS_PER_TON} stars = 1 TON"
+        "rate": f"{STARS_PER_TON} stars = 1 TON",
+        "bot_token_set": bool(BOT_TOKEN),
+        "database_url_set": bool(DATABASE_URL),
+        "admin_chat_id_set": bool(ADMIN_CHAT_ID),
+        "public_url": PUBLIC_URL or None,
     })
+
+
+# Diagnostic route: hit this in a browser after deploying to see whether Telegram
+# actually has a webhook registered for this bot, and what URL it's pointing at.
+@app.route("/webhook_info")
+def webhook_info():
+    if not BOT_TOKEN:
+        return jsonify({"error": "BOT_TOKEN not set"}), 500
+    try:
+        r = requests.get(f"{TELEGRAM_API}/getWebhookInfo", timeout=REQUEST_TIMEOUT)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Manually (re)register the webhook without redeploying, useful if PUBLIC_URL
+# changed or the automatic registration at startup failed.
+@app.route("/set_webhook")
+def set_webhook_route():
+    ok = set_webhook()
+    return jsonify({"ok": ok, "public_url": PUBLIC_URL})
 
 
 # ───────────────────────── Run ─────────────────────────
 if __name__ == "__main__":
     init_db()
+    set_webhook()
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Bot running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
