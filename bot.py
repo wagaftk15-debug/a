@@ -16,7 +16,7 @@ logging.basicConfig(
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-logger = logging.getLogger("NisaaBot")
+logger = logging.getLogger("StarTonBot")
 
 app = Flask(__name__)
 
@@ -26,35 +26,27 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
-DONATION_AMOUNTS = [100, 200, 500, 1000, 2000]
-DAILY_POINTS = 100
-REFERRAL_POINTS = 50
+# سعر الصرف: 1000 نجمة = 1 TON
+STARS_PER_TON = 1000
+MIN_EXCHANGE_STARS = 100          # أقل عدد نجوم مسموح بتبديله
+MAX_EXCHANGE_STARS = 1_000_000    # أعلى عدد نجوم مسموح بتبديله في الطلب الواحد
 
-# مستويات المهور
-MAHR_LEVELS = [
-    (0, "بلا متطلبات محددة 💚"),
-    (500, "متطلبات بسيطة 💛"),
-    (2000, "متطلبات معقولة 🧡"),
-    (5000, "متطلبات عالية 🔴"),
-    (15000, "متطلبات فاخرة 💎"),
-]
+EXCHANGE_AMOUNTS = [1000, 2000, 5000, 10000, 20000]
+
+REQUEST_TIMEOUT = 10
 
 # ───────────────────────── Connection Pool ─────────────────────────
 db_pool = None
 pool_lock = Lock()
 MAX_RETRIES = 3
 RETRY_DELAY = 0.4
-REQUEST_TIMEOUT = 10
 
 # ───────────────────────── Cache + Rate Limit ─────────────────────────
 cache = {}
 cache_lock = Lock()
 CACHE_TTL = {
     'stats': 30,
-    'leaderboard': 45,
-    'user_mahr': 10,
-    'count': 40,
-    'donations_stats': 30,
+    'myrequests': 15,
 }
 
 rate_limit = defaultdict(list)
@@ -62,12 +54,18 @@ rate_lock = Lock()
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX = 25
 
-# حالات المستخدمات
+# حالة المستخدم أثناء تعبئة طلب التبديل (بالذاكرة)
+# user_states[user_id] = "waiting_wallet" | "waiting_stars_custom"
 user_states = {}
 state_lock = Lock()
 
+# تخزين مؤقت لعنوان المحفظة بين خطوة إدخال العنوان وخطوة اختيار المبلغ
+pending_wallet = {}
+wallet_lock = Lock()
+
+
 def check_rate_limit(key: str) -> bool:
-    """يرجع True إذا مسموح"""
+    """يرجع True إذا مسموح بالطلب"""
     now = time.time()
     with rate_lock:
         rate_limit[key] = [t for t in rate_limit[key] if now - t < RATE_LIMIT_WINDOW]
@@ -76,13 +74,25 @@ def check_rate_limit(key: str) -> bool:
         rate_limit[key].append(now)
         return True
 
+
 # ───────────────────────── دوال مساعدة ─────────────────────────
-def get_mahr_level(amount: int) -> str:
-    level_name = MAHR_LEVELS[0][1]
-    for threshold, name in MAHR_LEVELS:
-        if amount >= threshold:
-            level_name = name
-    return level_name
+def stars_to_ton(stars: int) -> float:
+    return round(stars / STARS_PER_TON, 4)
+
+
+def format_ton(amount: float) -> str:
+    return f"{amount:.4f}".rstrip('0').rstrip('.') if '.' in f"{amount:.4f}" else f"{amount:.4f}"
+
+
+def is_valid_wallet(address: str) -> bool:
+    """تحقق بسيط من شكل عنوان محفظة TON (لا يضمن صحتها الفعلية)"""
+    if not address:
+        return False
+    address = address.strip()
+    if len(address) < 30 or len(address) > 68:
+        return False
+    return address.startswith(("UQ", "EQ", "kQ", "0Q")) or address.isalnum()
+
 
 def mask_name(name: str) -> str:
     if not name:
@@ -91,6 +101,17 @@ def mask_name(name: str) -> str:
     if len(name) <= 2:
         return name[0] + "*"
     return name[0] + "*" * (len(name) - 2) + name[-1]
+
+
+def status_label(status: str) -> str:
+    return {
+        "pending": "⏳ بانتظار المراجعة",
+        "accepted": "✅ تم القبول - بانتظار الدفع",
+        "rejected": "❌ مرفوض",
+        "paid": "💰 تم الدفع - بانتظار تحويل TON",
+        "completed": "🎉 مكتمل",
+    }.get(status, status)
+
 
 # ───────────────────────── Database ─────────────────────────
 def init_pool():
@@ -116,6 +137,7 @@ def init_pool():
         logger.error(f"❌ خطأ في Pool: {e}")
         return False
 
+
 def get_connection(retry=0):
     global db_pool
     if db_pool is None:
@@ -129,6 +151,7 @@ def get_connection(retry=0):
             return get_connection(retry + 1)
         raise Exception(f"فشل الاتصال: {str(e)[:80]}")
 
+
 def return_connection(conn, close=False):
     global db_pool
     if conn is None:
@@ -138,30 +161,33 @@ def return_connection(conn, close=False):
             conn.close()
         else:
             db_pool.putconn(conn)
-    except:
+    except Exception:
         try:
             conn.close()
-        except:
+        except Exception:
             pass
+
 
 def get_cache(key):
     with cache_lock:
         if key in cache:
             data, timestamp = cache[key]
-            ttl = CACHE_TTL.get(key.split('_')[0], 60)
+            ttl = CACHE_TTL.get(key.split('_')[0], 30)
             if data is not None and datetime.now() - timestamp < timedelta(seconds=ttl):
                 return data
             try:
                 del cache[key]
-            except:
+            except Exception:
                 pass
     return None
+
 
 def set_cache(key, data):
     if data is None:
         return
     with cache_lock:
         cache[key] = (data, datetime.now())
+
 
 def clear_cache(pattern=None):
     with cache_lock:
@@ -172,8 +198,9 @@ def clear_cache(pattern=None):
             for k in keys:
                 try:
                     del cache[k]
-                except:
+                except Exception:
                     pass
+
 
 def init_db():
     if not DATABASE_URL:
@@ -184,43 +211,33 @@ def init_db():
         cur = conn.cursor()
 
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS women (
+            CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
-                referred_by BIGINT,
                 updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS registrations (
-                user_id BIGINT PRIMARY KEY,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS mahr_requirements (
-                user_id BIGINT PRIMARY KEY,
-                mahr_amount INTEGER NOT NULL DEFAULT 0,
-                mahr_notes TEXT,
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS donations (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount INTEGER NOT NULL,
-                telegram_payment_charge_id TEXT UNIQUE,
-                created_at TIMESTAMP DEFAULT NOW()
             )
         """)
 
-        # Indexes
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_mahr_amount ON mahr_requirements(mahr_amount DESC)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_registrations_created ON registrations(created_at DESC)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_donations_user ON donations(user_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_women_referred ON women(referred_by)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS exchange_requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                stars_amount INTEGER NOT NULL,
+                ton_amount NUMERIC(18, 4) NOT NULL,
+                ton_wallet TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                telegram_payment_charge_id TEXT,
+                admin_note TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                processed_at TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+        """)
+
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_exchange_user ON exchange_requests(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_exchange_status ON exchange_requests(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_exchange_created ON exchange_requests(created_at DESC)")
 
         conn.commit()
         cur.close()
@@ -230,8 +247,9 @@ def init_db():
     finally:
         return_connection(conn)
 
-# ───────────────────────── Woman Functions ─────────────────────────
-def upsert_woman(user_id, username=None, first_name=None, referred_by=None):
+
+# ───────────────────────── Users ─────────────────────────
+def upsert_user(user_id, username=None, first_name=None):
     if not user_id:
         return
     conn = None
@@ -239,150 +257,124 @@ def upsert_woman(user_id, username=None, first_name=None, referred_by=None):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO women (user_id, username, first_name, referred_by, updated_at)
-            VALUES (%s, %s, %s, %s, NOW())
+            INSERT INTO users (user_id, username, first_name, updated_at)
+            VALUES (%s, %s, %s, NOW())
             ON CONFLICT (user_id) DO UPDATE
-            SET username = COALESCE(EXCLUDED.username, women.username),
-                first_name = COALESCE(EXCLUDED.first_name, women.first_name),
+            SET username = COALESCE(EXCLUDED.username, users.username),
+                first_name = COALESCE(EXCLUDED.first_name, users.first_name),
                 updated_at = NOW()
-        """, (user_id, username or '', first_name or '', referred_by))
+        """, (user_id, username or '', first_name or ''))
         conn.commit()
         cur.close()
     except Exception as e:
-        logger.error(f"upsert_woman error: {e}")
+        logger.error(f"upsert_user error: {e}")
     finally:
         return_connection(conn)
 
-def get_count():
-    cached = get_cache('count')
-    if cached is not None:
-        return cached
+
+def get_display_name(user_id):
     conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM registrations")
-        count = cur.fetchone()[0] or 0
-        cur.close()
-        set_cache('count', count)
-        return count
-    except Exception as e:
-        logger.error(f"get_count error: {e}")
-        return 0
-    finally:
-        return_connection(conn)
-
-def is_registered(user_id):
-    if not user_id:
-        return False
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM registrations WHERE user_id = %s LIMIT 1", (user_id,))
-        result = cur.fetchone() is not None
-        cur.close()
-        return result
-    except Exception as e:
-        logger.error(f"is_registered error: {e}")
-        return False
-    finally:
-        return_connection(conn)
-
-def register_woman(user_id, referred_by=None):
-    if not user_id:
-        return False
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO registrations (user_id) VALUES (%s)
-            ON CONFLICT DO NOTHING
-        """, (user_id,))
-        added = cur.rowcount > 0
-        conn.commit()
-        cur.close()
-
-        if added:
-            clear_cache('count')
-            if referred_by and referred_by != user_id:
-                send_message(referred_by, f"🎉 انضمت أختك الجديدة! حصلتِ على <b>{REFERRAL_POINTS}</b> نقطة إحالة!")
-        return added
-    except Exception as e:
-        logger.error(f"register_woman error: {e}")
-        return False
-    finally:
-        return_connection(conn)
-
-def unregister_woman(user_id):
-    if not user_id:
-        return False
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM registrations WHERE user_id = %s", (user_id,))
-        removed = cur.rowcount > 0
-        conn.commit()
-        cur.close()
-        if removed:
-            clear_cache('count')
-        return removed
-    except Exception as e:
-        logger.error(f"unregister_woman error: {e}")
-        return False
-    finally:
-        return_connection(conn)
-
-# ───────────────────────── Mahr Functions ─────────────────────────
-def set_mahr(user_id, amount, notes=None):
-    if not user_id or amount < 0:
-        return False
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO mahr_requirements (user_id, mahr_amount, mahr_notes)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id) DO UPDATE
-            SET mahr_amount = EXCLUDED.mahr_amount,
-                mahr_notes = EXCLUDED.mahr_notes,
-                updated_at = NOW()
-        """, (user_id, amount, notes[:500] if notes else None))
-        conn.commit()
-        cur.close()
-        clear_cache('leaderboard')
-        return True
-    except Exception as e:
-        logger.error(f"set_mahr error: {e}")
-        return False
-    finally:
-        return_connection(conn)
-
-def get_mahr(user_id):
-    if not user_id:
-        return 0, None
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT mahr_amount, mahr_notes FROM mahr_requirements WHERE user_id = %s", (user_id,))
+        cur.execute("SELECT username, first_name FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         cur.close()
         if row:
-            return row[0] or 0, row[1]
-        return 0, None
+            return row[0] or row[1] or str(user_id)
+        return str(user_id)
     except Exception as e:
-        logger.error(f"get_mahr error: {e}")
-        return 0, None
+        logger.error(f"get_display_name error: {e}")
+        return str(user_id)
     finally:
         return_connection(conn)
 
-def get_leaderboard(limit=10):
-    """الحصول على قائمة النساء مع متطلبات المهر"""
-    cached = get_cache('leaderboard')
+
+# ───────────────────────── Exchange Requests ─────────────────────────
+def create_exchange_request(user_id, stars_amount, ton_wallet):
+    conn = None
+    try:
+        ton_amount = stars_to_ton(stars_amount)
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO exchange_requests (user_id, stars_amount, ton_amount, ton_wallet, status)
+            VALUES (%s, %s, %s, %s, 'pending')
+            RETURNING id
+        """, (user_id, stars_amount, ton_amount, ton_wallet))
+        request_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        clear_cache('myrequests')
+        clear_cache('stats')
+        return request_id
+    except Exception as e:
+        logger.error(f"create_exchange_request error: {e}")
+        return None
+    finally:
+        return_connection(conn)
+
+
+def get_exchange_request(request_id):
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, user_id, stars_amount, ton_amount, ton_wallet, status,
+                   telegram_payment_charge_id, admin_note
+            FROM exchange_requests WHERE id = %s
+        """, (request_id,))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        return {
+            "id": row[0], "user_id": row[1], "stars_amount": row[2],
+            "ton_amount": float(row[3]), "ton_wallet": row[4], "status": row[5],
+            "charge_id": row[6], "admin_note": row[7],
+        }
+    except Exception as e:
+        logger.error(f"get_exchange_request error: {e}")
+        return None
+    finally:
+        return_connection(conn)
+
+
+def update_exchange_status(request_id, status, charge_id=None, admin_note=None, touch_completed=False):
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        sets = ["status = %s", "processed_at = NOW()"]
+        params = [status]
+        if charge_id is not None:
+            sets.append("telegram_payment_charge_id = %s")
+            params.append(charge_id)
+        if admin_note is not None:
+            sets.append("admin_note = %s")
+            params.append(admin_note[:500])
+        if touch_completed:
+            sets.append("completed_at = NOW()")
+        params.append(request_id)
+        cur.execute(f"UPDATE exchange_requests SET {', '.join(sets)} WHERE id = %s", params)
+        updated = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        if updated:
+            clear_cache('myrequests')
+            clear_cache('stats')
+        return updated
+    except Exception as e:
+        logger.error(f"update_exchange_status error: {e}")
+        return False
+    finally:
+        return_connection(conn)
+
+
+def get_user_requests(user_id, limit=5):
+    key = f"myrequests_{user_id}"
+    cached = get_cache(key)
     if cached is not None:
         return cached
     conn = None
@@ -390,83 +382,53 @@ def get_leaderboard(limit=10):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT
-                m.user_id,
-                COALESCE(NULLIF(w.username, ''), NULLIF(w.first_name, ''), 'مستخدمة') AS display_name,
-                m.mahr_amount,
-                m.mahr_notes
-            FROM mahr_requirements m
-            LEFT JOIN women w ON w.user_id = m.user_id
-            WHERE m.user_id IN (SELECT user_id FROM registrations)
-            ORDER BY m.mahr_amount DESC, m.user_id ASC
+            SELECT id, stars_amount, ton_amount, status, created_at
+            FROM exchange_requests
+            WHERE user_id = %s
+            ORDER BY created_at DESC
             LIMIT %s
-        """, (min(limit, 20),))
+        """, (user_id, limit))
         rows = cur.fetchall()
         cur.close()
         result = [
-            {
-                "user_id": r[0],
-                "name": r[1] or 'مستخدمة',
-                "mahr_amount": r[2] or 0,
-                "mahr_notes": r[3]
-            }
+            {"id": r[0], "stars_amount": r[1], "ton_amount": float(r[2]),
+             "status": r[3], "created_at": r[4]}
             for r in rows
         ]
-        if result:
-            set_cache('leaderboard', result)
+        set_cache(key, result)
         return result
     except Exception as e:
-        logger.error(f"get_leaderboard error: {e}")
+        logger.error(f"get_user_requests error: {e}")
         return []
     finally:
         return_connection(conn)
 
-# ───────────────────────── Donations ─────────────────────────
-def record_donation(user_id, amount, charge_id):
-    if not user_id or amount <= 0:
-        return False
-    conn = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO donations (user_id, amount, telegram_payment_charge_id)
-            VALUES (%s, %s, %s)
-            ON CONFLICT DO NOTHING
-        """, (user_id, amount, charge_id or None))
-        added = cur.rowcount > 0
-        conn.commit()
-        cur.close()
-        if added:
-            clear_cache('donations_stats')
-        return added
-    except Exception as e:
-        logger.error(f"record_donation error: {e}")
-        return False
-    finally:
-        return_connection(conn)
 
-def get_donations_stats():
-    cached = get_cache('donations_stats')
+def get_admin_stats():
+    cached = get_cache('stats')
     if cached is not None:
         return cached
     conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM donations")
-        row = cur.fetchone()
+        cur.execute("""
+            SELECT status, COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(ton_amount), 0)
+            FROM exchange_requests GROUP BY status
+        """)
+        rows = cur.fetchall()
         cur.close()
-        result = (row[0] or 0, row[1] or 0) if row else (0, 0)
-        set_cache('donations_stats', result)
+        result = {r[0]: {"count": r[1], "stars": r[2], "ton": float(r[3])} for r in rows}
+        set_cache('stats', result)
         return result
     except Exception as e:
-        logger.error(f"get_donations_stats error: {e}")
-        return (0, 0)
+        logger.error(f"get_admin_stats error: {e}")
+        return {}
     finally:
         return_connection(conn)
 
-# ───────────────────────── Telegram ─────────────────────────
+
+# ───────────────────────── Telegram API ─────────────────────────
 def send_message(chat_id, text, reply_markup=None):
     if not chat_id or not text:
         return False
@@ -485,6 +447,7 @@ def send_message(chat_id, text, reply_markup=None):
         logger.error(f"send_message error: {e}")
         return False
 
+
 def answer_callback(callback_id, text="", show_alert=False):
     try:
         requests.post(
@@ -494,6 +457,7 @@ def answer_callback(callback_id, text="", show_alert=False):
         )
     except Exception as e:
         logger.error(f"answer_callback error: {e}")
+
 
 def send_invoice(chat_id, amount, title, description, payload_str):
     if not chat_id or amount <= 0:
@@ -512,12 +476,13 @@ def send_invoice(chat_id, amount, title, description, payload_str):
         r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=payload, timeout=REQUEST_TIMEOUT)
         result = r.json()
         if not result.get('ok'):
-            send_message(chat_id, "⚠️ حصل خطأ في إنشاء الفاتورة، جرب مرة ثانية.")
+            send_message(chat_id, "⚠️ حصل خطأ في إنشاء فاتورة الدفع، جرب مرة ثانية.")
             return False
         return True
     except Exception as e:
         logger.error(f"send_invoice error: {e}")
         return False
+
 
 def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
     try:
@@ -528,55 +493,139 @@ def answer_pre_checkout(pre_checkout_query_id, ok=True, error_message=None):
     except Exception as e:
         logger.error(f"answer_pre_checkout error: {e}")
 
+
+def notify_admin(text, reply_markup=None):
+    if ADMIN_CHAT_ID:
+        send_message(ADMIN_CHAT_ID, text, reply_markup)
+
+
 # ───────────────────────── Keyboards ─────────────────────────
 def main_keyboard():
-    keyboard = [
-        [{"text": "✅ تسجيل رغبتي بالزواج", "callback_data": "want_marry"}],
-        [
-            {"text": "💍 تحديد المهر", "callback_data": "set_mahr"},
-            {"text": "📊 قائمة الأخوات", "callback_data": "show_leaderboard"},
-        ],
-        [
-            {"text": "⭐ دعم البوت", "callback_data": "show_donate"},
-            {"text": "❓ المساعدة", "callback_data": "help"},
-        ],
-        [{"text": "❌ إلغاء التسجيل", "callback_data": "unsubscribe"}]
-    ]
-    return {"inline_keyboard": keyboard}
-
-def donation_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": f"⭐ {amount}", "callback_data": f"donate_{amount}"}]
-            for amount in DONATION_AMOUNTS
-        ] + [[{"text": "🔙 رجوع", "callback_data": "back_main"}]]
+            [{"text": "🔄 تبديل نجوم بـ TON", "callback_data": "exchange_start"}],
+            [{"text": "📋 طلباتي", "callback_data": "my_requests"}],
+            [{"text": "❓ المساعدة", "callback_data": "help"}],
+        ]
     }
 
-def mahr_amount_keyboard():
-    amounts = [1000, 2500, 5000, 10000, 20000]
+
+def exchange_amount_keyboard():
     keyboard = []
-    for amount in amounts:
-        keyboard.append([{"text": f"💍 {amount:,}", "callback_data": f"mahr_amount_{amount}"}])
-    keyboard.append([{"text": "📝 مبلغ مخصص", "callback_data": "mahr_custom"}])
+    for amount in EXCHANGE_AMOUNTS:
+        ton = format_ton(stars_to_ton(amount))
+        keyboard.append([{"text": f"⭐ {amount:,} ← {ton} TON", "callback_data": f"exchange_amt_{amount}"}])
+    keyboard.append([{"text": "📝 مبلغ مخصص", "callback_data": "exchange_custom"}])
     keyboard.append([{"text": "🔙 رجوع", "callback_data": "back_main"}])
     return {"inline_keyboard": keyboard}
 
-def build_leaderboard_text():
-    top = get_leaderboard(15)
-    if not top:
-        return "🙂 لم تسجل أي أخت متطلبات المهر بعد"
-    medals = ["🥇", "🥈", "🥉"]
-    lines = ["💍 <b>قائمة متطلبات المهر</b>\n"]
-    for i, u in enumerate(top):
-        medal = medals[i] if i < 3 else f"{i+1}."
-        level = get_mahr_level(u['mahr_amount'])
-        notes = f" - {u['mahr_notes'][:30]}" if u['mahr_notes'] else ""
-        lines.append(f"{medal} {mask_name(u['name'])} → <b>{u['mahr_amount']:,}</b> 💍 {level}{notes}")
-    return "\n".join(lines)
 
-def notify_admin(text):
-    if ADMIN_CHAT_ID:
-        send_message(ADMIN_CHAT_ID, text)
+def admin_decision_keyboard(request_id):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ قبول", "callback_data": f"exchange_accept_{request_id}"},
+                {"text": "❌ رفض", "callback_data": f"exchange_reject_{request_id}"},
+            ]
+        ]
+    }
+
+
+def admin_mark_done_keyboard(request_id):
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ تم تحويل الـ TON", "callback_data": f"exchange_done_{request_id}"}]
+        ]
+    }
+
+
+def build_my_requests_text(user_id):
+    reqs = get_user_requests(user_id, 5)
+    if not reqs:
+        return "لا توجد طلبات تبديل سابقة 🙂"
+    lines = ["📋 <b>آخر طلباتك:</b>\n"]
+    for r in reqs:
+        lines.append(
+            f"#{r['id']} • ⭐ {r['stars_amount']:,} ← {format_ton(r['ton_amount'])} TON\n"
+            f"الحالة: {status_label(r['status'])}"
+        )
+    return "\n\n".join(lines)
+
+
+# ───────────────────────── State Helpers ─────────────────────────
+def set_state(user_id, state):
+    with state_lock:
+        if state is None:
+            user_states.pop(user_id, None)
+        else:
+            user_states[user_id] = state
+
+
+def get_state(user_id):
+    with state_lock:
+        return user_states.get(user_id)
+
+
+def set_pending_wallet(user_id, wallet):
+    with wallet_lock:
+        pending_wallet[user_id] = wallet
+
+
+def pop_pending_wallet(user_id):
+    with wallet_lock:
+        return pending_wallet.pop(user_id, None)
+
+
+# ───────────────────────── Exchange Flow ─────────────────────────
+def start_exchange_request(user_id, chat_id, stars_amount, wallet, callback_id=None):
+    if stars_amount < MIN_EXCHANGE_STARS:
+        msg = f"❌ أقل عدد نجوم للتبديل هو {MIN_EXCHANGE_STARS:,} ⭐"
+        if callback_id:
+            answer_callback(callback_id, msg, show_alert=True)
+        else:
+            send_message(chat_id, msg)
+        return
+    if stars_amount > MAX_EXCHANGE_STARS:
+        msg = f"❌ أقصى عدد نجوم للتبديل هو {MAX_EXCHANGE_STARS:,} ⭐ لكل طلب"
+        if callback_id:
+            answer_callback(callback_id, msg, show_alert=True)
+        else:
+            send_message(chat_id, msg)
+        return
+
+    request_id = create_exchange_request(user_id, stars_amount, wallet)
+    if not request_id:
+        msg = "⚠️ حصل خطأ أثناء إنشاء الطلب، حاول مرة ثانية."
+        if callback_id:
+            answer_callback(callback_id, msg, show_alert=True)
+        else:
+            send_message(chat_id, msg)
+        return
+
+    ton_amount = stars_to_ton(stars_amount)
+    if callback_id:
+        answer_callback(callback_id, "✅ تم إرسال طلبك")
+
+    send_message(
+        chat_id,
+        f"✅ تم استلام طلب التبديل رقم <b>#{request_id}</b>\n\n"
+        f"⭐ النجوم: <b>{stars_amount:,}</b>\n"
+        f"💎 مقابل: <b>{format_ton(ton_amount)} TON</b>\n"
+        f"👛 المحفظة: <code>{wallet}</code>\n\n"
+        f"⏳ طلبك الآن قيد المراجعة من الإدارة، بنعلمك فور اتخاذ القرار."
+    )
+
+    display_name = get_display_name(user_id)
+    notify_admin(
+        f"🆕 <b>طلب تبديل جديد</b> #{request_id}\n\n"
+        f"👤 المستخدم: {display_name} (<code>{user_id}</code>)\n"
+        f"⭐ النجوم: <b>{stars_amount:,}</b>\n"
+        f"💎 يعادل: <b>{format_ton(ton_amount)} TON</b>\n"
+        f"👛 المحفظة: <code>{wallet}</code>\n\n"
+        f"اقبل أو ارفض الطلب:",
+        admin_decision_keyboard(request_id)
+    )
+
 
 # ───────────────────────── Webhook ─────────────────────────
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
@@ -586,13 +635,13 @@ def webhook():
 
     update = request.get_json(force=True, silent=True) or {}
 
-    # Pre-checkout
+    # Pre-checkout: نوافق مباشرة دائماً (التحقق الفعلي تم قبل إرسال الفاتورة)
     if "pre_checkout_query" in update:
         pcq = update["pre_checkout_query"]
         answer_pre_checkout(pcq["id"], ok=True)
         return jsonify({"ok": True})
 
-    # Message
+    # ───────────── Message ─────────────
     if "message" in update:
         msg = update["message"]
         chat_id = msg.get("chat", {}).get("id")
@@ -601,121 +650,116 @@ def webhook():
         user_id = sender.get("id")
 
         if user_id:
-            upsert_woman(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
+            upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
-        # Successful Payment
+        # دفعة ناجحة (تحويل النجوم فعلياً)
         if "successful_payment" in msg:
             sp = msg["successful_payment"]
             amount = sp.get("total_amount", 0)
             charge_id = sp.get("telegram_payment_charge_id", "")
-            
-            if amount > 0 and user_id:
-                success = record_donation(user_id, amount, charge_id)
-                if success:
-                    send_message(chat_id, f"💛 شكراً لدعمك الكبير!\nتم استلام: <b>{amount}⭐</b>\n\nجزاك الله خيراً 🤲")
-                    notify_admin(f"✅ دعم جديد\nالمستخدمة: {user_id}\nالمبلغ: {amount}⭐")
-                else:
-                    send_message(chat_id, "⚠️ تم الدفع لكن حصل خطأ في التسجيل.")
-            return jsonify({"ok": True})
+            invoice_payload = sp.get("invoice_payload", "")
 
-        # حالة انتظار إدخال المهر
-        with state_lock:
-            state = user_states.get(user_id)
-
-        if state == "waiting_mahr" and text and not text.startswith("/"):
-            try:
-                # استخراج المبلغ من الرسالة
-                mahr_amount = int(''.join(filter(str.isdigit, text.split()[0])))
-                mahr_notes = text[len(str(mahr_amount)):].strip() or None
-                
-                if mahr_amount > 0:
-                    success = set_mahr(user_id, mahr_amount, mahr_notes)
-                    with state_lock:
-                        user_states.pop(user_id, None)
-                    if success:
-                        level = get_mahr_level(mahr_amount)
-                        send_message(chat_id, f"✅ تم تسجيل متطلبات المهر بنجاح!\n\n💍 المبلغ: <b>{mahr_amount:,}</b>\n📍 المستوى: {level}\n\nيمكن للأخوات البحث عنك الآن 💕")
-                        notify_admin(f"💍 تحديث مهر\nالمستخدمة: {user_id}\nالمبلغ: {mahr_amount:,}")
-                    else:
-                        send_message(chat_id, "❌ حصل خطأ أثناء التسجيل.")
-                else:
-                    send_message(chat_id, "❌ يجب إدخال رقم صحيح")
-            except:
-                send_message(chat_id, "❌ صيغة خاطئة. أدخلي الرقم بشكل صحيح مثل: 5000")
-            return jsonify({"ok": True})
-
-        # أوامر
-        if text.startswith("/start"):
-            referred_by = None
-            parts = text.split()
-            if len(parts) > 1 and parts[1].startswith("ref_"):
+            if invoice_payload.startswith("exchange_") and user_id:
                 try:
-                    referred_by = int(parts[1].replace("ref_", ""))
-                except:
-                    pass
-            upsert_woman(user_id, username=sender.get("username"), first_name=sender.get("first_name"), referred_by=referred_by)
+                    request_id = int(invoice_payload.split("_")[1])
+                except Exception:
+                    request_id = None
 
+                req = get_exchange_request(request_id) if request_id else None
+                if req and req["status"] == "accepted":
+                    update_exchange_status(request_id, "paid", charge_id=charge_id)
+                    send_message(
+                        chat_id,
+                        f"💛 تم استلام <b>{amount:,}⭐</b> بنجاح لطلبك #{request_id}\n\n"
+                        f"سيتم تحويل <b>{format_ton(req['ton_amount'])} TON</b> إلى محفظتك خلال وقت قصير 🙏"
+                    )
+                    display_name = get_display_name(user_id)
+                    notify_admin(
+                        f"💰 <b>دفعة مستلمة</b> - طلب #{request_id}\n\n"
+                        f"👤 {display_name} (<code>{user_id}</code>)\n"
+                        f"⭐ {amount:,} تم استلامها\n"
+                        f"👛 حوّل <b>{format_ton(req['ton_amount'])} TON</b> إلى:\n<code>{req['ton_wallet']}</code>",
+                        admin_mark_done_keyboard(request_id)
+                    )
+                else:
+                    logger.error(f"successful_payment: exchange request {request_id} not in expected state")
+                    send_message(chat_id, "⚠️ تم استلام الدفعة، لكن حصل خطأ بتحديث الطلب. تواصل مع الدعم رجاءً.")
+            return jsonify({"ok": True})
+
+        # ───── حالة انتظار إدخال عنوان المحفظة ─────
+        state = get_state(user_id)
+
+        if state == "waiting_wallet" and text and not text.startswith("/"):
+            if not is_valid_wallet(text):
+                send_message(chat_id, "❌ عنوان المحفظة غير صحيح. تأكدي من نسخه بشكل صحيح من محفظتك (Tonkeeper, Tonhub...الخ) وأرسليه مرة ثانية.")
+                return jsonify({"ok": True})
+            set_pending_wallet(user_id, text)
+            set_state(user_id, None)
+            send_message(chat_id, "👛 تم استلام عنوان المحفظة ✅\n\nالآن اختاري عدد النجوم التي تريدين تبديلها:", exchange_amount_keyboard())
+            return jsonify({"ok": True})
+
+        # ───── حالة انتظار إدخال مبلغ نجوم مخصص ─────
+        if state == "waiting_stars_custom" and text and not text.startswith("/"):
+            wallet = pop_pending_wallet(user_id)
+            if not wallet:
+                set_state(user_id, None)
+                send_message(chat_id, "⚠️ انتهت صلاحية الجلسة، ابدئي من جديد بالضغط على 🔄 تبديل نجوم بـ TON")
+                return jsonify({"ok": True})
+            digits = ''.join(filter(str.isdigit, text))
+            if not digits:
+                send_message(chat_id, "❌ يجب إدخال رقم صحيح، مثال: 3000")
+                set_pending_wallet(user_id, wallet)
+                return jsonify({"ok": True})
+            stars_amount = int(digits)
+            set_state(user_id, None)
+            start_exchange_request(user_id, chat_id, stars_amount, wallet)
+            return jsonify({"ok": True})
+
+        # ───── الأوامر ─────
+        if text.startswith("/start"):
             send_message(
                 chat_id,
-                "👋 أهلاً وسهلاً بك في <b>بوت نساء الزواج</b> 💍\n\n"
-                "هنا تقدري تسجلي رغبتك بالزواج وتحددي متطلبات المهر الخاص بك.\n\n"
-                "🌟 المميزات:\n"
-                "✨ تسجيل آمن وسهل\n"
-                "💍 تحديد المهر بوضوح\n"
-                "📊 البحث عن الشريك المناسب\n"
-                "🤝 مجتمع آمن وملتزم\n\n"
+                "👋 أهلاً بك في <b>بوت تبديل النجوم بعملة TON</b> 💎\n\n"
+                f"💱 سعر الصرف الحالي: <b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
+                "طريقة العمل:\n"
+                "1️⃣ تقدّمي بطلب تبديل (نرسل لك عنوان محفظتك)\n"
+                "2️⃣ الإدارة تراجع الطلب وتقبله أو ترفضه\n"
+                "3️⃣ إذا تم القبول، تدفعي النجوم عبر تيليجرام\n"
+                "4️⃣ نحوّل لك مبلغ TON المقابل إلى محفظتك\n\n"
                 "اختاري من القائمة:",
                 main_keyboard()
             )
 
-        elif text in ("/عدد", "/count"):
-            send_message(chat_id, f"<b>عدد الأخوات المسجلات حالياً:</b> {get_count()} 💍")
+        elif text in ("/طلباتي", "/requests", "/myrequests"):
+            send_message(chat_id, build_my_requests_text(user_id))
 
-        elif text in ("/معلوماتي", "/info"):
-            mahr_amount, mahr_notes = get_mahr(user_id)
-            level = get_mahr_level(mahr_amount)
-            registered = "✅ مسجلة" if is_registered(user_id) else "❌ غير مسجلة"
-            mahr_text = f"💍 المهر: <b>{mahr_amount:,}</b> ({level})" if mahr_amount > 0 else "❌ لم تحددي المهر بعد"
+        elif text in ("/مساعدة", "/help"):
             send_message(
                 chat_id,
-                f"👤 <b>معلوماتك:</b>\n\n"
-                f"• الحالة: {registered}\n"
-                f"• {mahr_text}"
+                "❓ <b>عن البوت</b>\n\n"
+                f"يبدّل البوت نجوم تيليجرام مقابل عملة TON بسعر ثابت:\n"
+                f"<b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
+                "كل طلب يمر بمراجعة يدوية من الإدارة قبل الدفع، وبعد الدفع "
+                "يتم تحويل الـ TON يدوياً إلى محفظتك.\n\n"
+                "الأوامر:\n"
+                "/start - القائمة الرئيسية\n"
+                "/طلباتي - عرض طلباتك السابقة"
             )
-
-        elif text in ("/قائمة", "/list", "/leaderboard"):
-            send_message(chat_id, build_leaderboard_text())
-
-        elif text in ("/انسحب", "/unsubscribe"):
-            if is_registered(user_id):
-                send_message(chat_id, "متأكدة إنك تبي تلغي التسجيل؟", {
-                    "inline_keyboard": [
-                        [{"text": "✅ نعم، ألغِ", "callback_data": "confirm_unsubscribe"}],
-                        [{"text": "🙅 لا، رجّعي", "callback_data": "cancel_unsubscribe"}],
-                    ]
-                })
-            else:
-                send_message(chat_id, "أنتِ أصلاً مش مسجلة 🙂")
 
         # أوامر الأدمن
         elif text.startswith("/admin") and str(user_id) == str(ADMIN_CHAT_ID):
-            count = get_count()
-            d_count, d_total = get_donations_stats()
-            top = get_leaderboard(5)
-            send_message(
-                chat_id,
-                f"🛠 <b>لوحة الأدمن</b>\n\n"
-                f"• المسجلات: {count}\n"
-                f"• عدد التبرعات: {d_count}\n"
-                f"• مجموع النجوم: {d_total}⭐\n"
-                f"• أعلى مهور: {', '.join([f'{u[\"mahr_amount\"]:,}' for u in top]) if top else 'لا توجد بيانات'}"
-            )
+            stats = get_admin_stats()
+            lines = ["🛠 <b>لوحة الأدمن</b>\n"]
+            for status_key in ("pending", "accepted", "paid", "completed", "rejected"):
+                s = stats.get(status_key, {"count": 0, "stars": 0, "ton": 0})
+                lines.append(f"{status_label(status_key)}: {s['count']} طلب / {s['stars']:,}⭐ / {format_ton(s['ton'])} TON")
+            send_message(chat_id, "\n".join(lines))
 
         elif text == "/clearcache" and str(user_id) == str(ADMIN_CHAT_ID):
             clear_cache()
             send_message(chat_id, "✅ تم مسح الـ Cache")
 
-    # Callback Query
+    # ───────────── Callback Query ─────────────
     elif "callback_query" in update:
         cq = update["callback_query"]
         sender = cq.get("from", {})
@@ -724,106 +768,116 @@ def webhook():
         callback_id = cq.get("id")
         data_key = cq.get("data", "")
 
-        upsert_woman(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
+        upsert_user(user_id, username=sender.get("username"), first_name=sender.get("first_name"))
 
-        if data_key == "want_marry":
-            if is_registered(user_id):
-                answer_callback(callback_id, "أنتِ مسجلة بالفعل 😄", show_alert=True)
-            else:
-                if register_woman(user_id):
-                    answer_callback(callback_id, "✅ تم التسجيل!")
-                    send_message(chat_id, f"🎉 تم تسجيلك بنجاح!\n\nعدد الأخوات المسجلات: <b>{get_count()}</b> 💍\n\nالآن حددي متطلبات المهر الخاص بك")
-                    send_message(chat_id, "الآن، كم متطلبات المهر الخاص بك؟", mahr_amount_keyboard())
-                else:
-                    answer_callback(callback_id, "أنتِ مسجلة مسبقاً", show_alert=True)
-
-        elif data_key == "set_mahr":
+        if data_key == "exchange_start":
             answer_callback(callback_id, "")
-            send_message(chat_id, "اختاري مبلغ المهر أو حددي مبلغ مخصص:", mahr_amount_keyboard())
+            set_state(user_id, "waiting_wallet")
+            send_message(
+                chat_id,
+                "👛 أرسلي عنوان محفظة TON التي تريدين استلام العملة عليها\n\n"
+                "مثال: <code>UQAbCdEf...</code>\n\n"
+                "⚠️ تأكدي من صحة العنوان جيداً، البوت لا يتحمل مسؤولية تحويلات لعناوين خاطئة."
+            )
 
-        elif data_key == "show_leaderboard":
+        elif data_key == "my_requests":
             answer_callback(callback_id, "")
-            send_message(chat_id, build_leaderboard_text())
-
-        elif data_key == "show_donate":
-            answer_callback(callback_id, "")
-            send_message(chat_id, "💛 ادعمي المشروع بنجوم تيليجرام:", donation_keyboard())
+            send_message(chat_id, build_my_requests_text(user_id))
 
         elif data_key == "help":
             answer_callback(callback_id, "")
-            send_message(chat_id, 
-                "❓ <b>معلومات عن البوت</b>\n\n"
-                "البوت يساعدك على:\n"
-                "✨ تسجيل رغبتك بالزواج\n"
-                "💍 تحديد متطلبات مهرك\n"
-                "📊 رؤية ملفات الأخوات الأخريات\n"
-                "🤝 دعم المشروع\n\n"
-                "الأوامر المتاحة:\n"
-                "/start - الرئيسية\n"
-                "/info - معلوماتك\n"
-                "/count - عدد المسجلات\n"
-                "/list - قائمة المهور\n"
-                "/unsubscribe - إلغاء التسجيل"
+            send_message(
+                chat_id,
+                "❓ <b>عن البوت</b>\n\n"
+                f"يبدّل البوت نجوم تيليجرام مقابل TON بسعر ثابت: <b>{STARS_PER_TON:,} ⭐ = 1 TON</b>\n\n"
+                "كل طلب يمر بمراجعة يدوية قبل الدفع، وبعد الدفع تُحوَّل الـ TON يدوياً إلى محفظتك."
             )
-
-        elif data_key == "unsubscribe":
-            answer_callback(callback_id, "")
-            send_message(chat_id, "متأكدة إنك تبي تلغي التسجيل؟", {
-                "inline_keyboard": [
-                    [{"text": "✅ نعم", "callback_data": "confirm_unsubscribe"}],
-                    [{"text": "🙅 لا", "callback_data": "cancel_unsubscribe"}],
-                ]
-            })
-
-        elif data_key == "confirm_unsubscribe":
-            if unregister_woman(user_id):
-                answer_callback(callback_id, "✅ تم إلغاء التسجيل")
-                send_message(chat_id, f"👋 تم إلغاء تسجيلك.\n\nإذا تبي تتسجلي مرة ثانية، أكتبي /start")
-            else:
-                answer_callback(callback_id, "أنتِ مش مسجلة", show_alert=True)
-
-        elif data_key == "cancel_unsubscribe":
-            answer_callback(callback_id, "👍 تم التراجع")
 
         elif data_key == "back_main":
             answer_callback(callback_id, "")
             send_message(chat_id, "القائمة الرئيسية:", main_keyboard())
 
-        elif data_key == "mahr_custom":
+        elif data_key == "exchange_custom":
+            wallet = None
+            with wallet_lock:
+                wallet = pending_wallet.get(user_id)
+            if not wallet:
+                answer_callback(callback_id, "أدخلي عنوان المحفظة أولاً", show_alert=True)
+                set_state(user_id, "waiting_wallet")
+                send_message(chat_id, "👛 أرسلي عنوان محفظة TON أولاً:")
+                return jsonify({"ok": True})
             answer_callback(callback_id, "")
-            with state_lock:
-                user_states[user_id] = "waiting_mahr"
-            send_message(chat_id, "كتبي المبلغ الذي تريدينه (بالأرقام فقط)\nمثل: 5000\nأو مع ملاحظات: 5000 إذا كان صادق في نيته")
+            set_state(user_id, "waiting_stars_custom")
+            send_message(chat_id, f"📝 اكتبي عدد النجوم التي تريدين تبديلها (بالأرقام فقط)\nالحد الأدنى: {MIN_EXCHANGE_STARS:,} ⭐")
 
-        elif data_key.startswith("mahr_amount_"):
+        elif data_key.startswith("exchange_amt_"):
+            wallet = pop_pending_wallet(user_id)
+            if not wallet:
+                answer_callback(callback_id, "أدخلي عنوان المحفظة أولاً", show_alert=True)
+                set_state(user_id, "waiting_wallet")
+                send_message(chat_id, "👛 أرسلي عنوان محفظة TON أولاً:")
+                return jsonify({"ok": True})
             try:
                 amount = int(data_key.split("_")[2])
-                if amount > 0:
-                    success = set_mahr(user_id, amount)
-                    if success:
-                        level = get_mahr_level(amount)
-                        answer_callback(callback_id, "✅ تم التسجيل!")
-                        send_message(chat_id, f"✅ تم تسجيل متطلبات المهر بنجاح!\n\n💍 المبلغ: <b>{amount:,}</b>\n📍 المستوى: {level}\n\nيمكن للأخوات البحث عنك الآن 💕")
-                        notify_admin(f"💍 تحديث مهر\nالمستخدمة: {user_id}\nالمبلغ: {amount:,}")
-                    else:
-                        answer_callback(callback_id, "خطأ في التسجيل", show_alert=True)
-                else:
-                    answer_callback(callback_id, "مبلغ غير صالح", show_alert=True)
-            except:
+            except Exception:
                 answer_callback(callback_id, "خطأ", show_alert=True)
+                return jsonify({"ok": True})
+            start_exchange_request(user_id, chat_id, amount, wallet, callback_id=callback_id)
 
-        elif data_key.startswith("donate_"):
+        # ───── قرارات الأدمن ─────
+        elif data_key.startswith("exchange_accept_") and str(user_id) == str(ADMIN_CHAT_ID):
             try:
-                amount = int(data_key.split("_")[1])
-                if amount in DONATION_AMOUNTS:
-                    success = send_invoice(chat_id, amount, f"دعم {amount}⭐", "شكراً لدعمك 💛", f"donate_{amount}")
-                    answer_callback(callback_id, "✅ تم إرسال الفاتورة" if success else "❌ فشل", show_alert=not success)
-                else:
-                    answer_callback(callback_id, "مبلغ غير صالح", show_alert=True)
-            except:
+                request_id = int(data_key.split("_")[2])
+            except Exception:
                 answer_callback(callback_id, "خطأ", show_alert=True)
+                return jsonify({"ok": True})
+            req = get_exchange_request(request_id)
+            if not req or req["status"] != "pending":
+                answer_callback(callback_id, "الطلب غير متاح للقبول", show_alert=True)
+                return jsonify({"ok": True})
+            update_exchange_status(request_id, "accepted")
+            sent = send_invoice(
+                req["user_id"], req["stars_amount"],
+                f"تبديل {req['stars_amount']}⭐",
+                f"مقابل {format_ton(req['ton_amount'])} TON",
+                f"exchange_{request_id}"
+            )
+            if sent:
+                answer_callback(callback_id, "✅ تم القبول وإرسال فاتورة الدفع للمستخدم")
+                send_message(req["user_id"], f"✅ تم قبول طلبك #{request_id}!\nسيصلك الآن طلب دفع {req['stars_amount']:,}⭐، أكملي الدفع لإتمام التبديل.")
+            else:
+                answer_callback(callback_id, "تم القبول لكن فشل إرسال فاتورة الدفع", show_alert=True)
+
+        elif data_key.startswith("exchange_reject_") and str(user_id) == str(ADMIN_CHAT_ID):
+            try:
+                request_id = int(data_key.split("_")[2])
+            except Exception:
+                answer_callback(callback_id, "خطأ", show_alert=True)
+                return jsonify({"ok": True})
+            req = get_exchange_request(request_id)
+            if not req or req["status"] != "pending":
+                answer_callback(callback_id, "الطلب غير متاح للرفض", show_alert=True)
+                return jsonify({"ok": True})
+            update_exchange_status(request_id, "rejected")
+            answer_callback(callback_id, "❌ تم رفض الطلب")
+            send_message(req["user_id"], f"❌ نعتذر، تم رفض طلب التبديل #{request_id}.\nيمكنك تقديم طلب جديد إذا رغبتِ.")
+
+        elif data_key.startswith("exchange_done_") and str(user_id) == str(ADMIN_CHAT_ID):
+            try:
+                request_id = int(data_key.split("_")[2])
+            except Exception:
+                answer_callback(callback_id, "خطأ", show_alert=True)
+                return jsonify({"ok": True})
+            req = get_exchange_request(request_id)
+            if not req or req["status"] != "paid":
+                answer_callback(callback_id, "الطلب غير متاح للإكمال", show_alert=True)
+                return jsonify({"ok": True})
+            update_exchange_status(request_id, "completed", touch_completed=True)
+            answer_callback(callback_id, "✅ تم تعليم الطلب كمكتمل")
+            send_message(req["user_id"], f"🎉 تم تحويل <b>{format_ton(req['ton_amount'])} TON</b> إلى محفظتك بنجاح!\nشكراً لاستخدامك البوت 💎")
 
     return jsonify({"ok": True})
+
 
 # ───────────────────────── Health Check ─────────────────────────
 @app.route("/health")
@@ -831,8 +885,9 @@ def health():
     return jsonify({
         "status": "ok",
         "time": datetime.now().isoformat(),
-        "registered": get_count()
+        "rate": f"{STARS_PER_TON} stars = 1 TON"
     })
+
 
 # ───────────────────────── تشغيل ─────────────────────────
 if __name__ == "__main__":
