@@ -1,456 +1,553 @@
 import os
-import re
-import io
-import csv
-import json
-import time
 import html
 import logging
-import statistics
-from threading import Lock
-from collections import defaultdict
 from contextlib import contextmanager
 
-import requests
 import psycopg2
-from psycopg2 import pool
-from flask import Flask, request, jsonify
-
-# ───────────────────────── Logging ─────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, LabeledPrice,
 )
-logger = logging.getLogger("MahrBot")
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
+    ConversationHandler, PreCheckoutQueryHandler, ContextTypes, Defaults, filters,
+)
 
-app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("shop-bot")
 
-# ───────────────────────── Config ─────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")  # رقم حساب الأدمن
+# ───────────────────────── الإعدادات ─────────────────────────
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
+ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
 
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
-if not PUBLIC_URL and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
-    PUBLIC_URL = f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}"
+PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "آلة لحام بلاستيك PFS-300")
+PRODUCT_DESC = os.environ.get("PRODUCT_DESC", "آلة لحام بلاستيك PFS-300 — جاهزة للاستعمال.")
+PRODUCT_PHOTO_URL = os.environ.get("PRODUCT_PHOTO_URL", "")  # اختياري: رابط صورة أو file_id
+PRICE_STARS = int(os.environ.get("PRICE_STARS", "5000"))
+RESERVE_MINUTES = 10
 
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+PHONE, WILAYA, ADDRESS, CONFIRM = range(4)
 
-REQUEST_TIMEOUT = 10
-MIN_AMOUNT = 1
-MAX_AMOUNT = 1_000_000_000_000  # تريليون كحد أعلى لتجنب الإدخالات العبثية
+WILAYAS = [
+    "أدرار", "الشلف", "الأغواط", "أم البواقي", "باتنة", "بجاية", "بسكرة", "بشار", "البليدة", "البويرة",
+    "تمنراست", "تبسة", "تلمسان", "تيارت", "تيزي وزو", "الجزائر", "الجلفة", "جيجل", "سطيف", "سعيدة",
+    "سكيكدة", "سيدي بلعباس", "عنابة", "قالمة", "قسنطينة", "المدية", "مستغانم", "المسيلة", "معسكر", "ورقلة",
+    "وهران", "البيض", "إليزي", "برج بوعريريج", "بومرداس", "الطارف", "تندوف", "تيسمسيلت", "الوادي", "خنشلة",
+    "سوق أهراس", "تيبازة", "ميلة", "عين الدفلى", "النعامة", "عين تموشنت", "غرداية", "غليزان", "تيميمون",
+    "برج باجي مختار", "أولاد جلال", "بني عباس", "عين صالح", "عين قزام", "تقرت", "جانت", "المغير", "المنيعة",
+]
 
-QUESTION = "💍 <b>كم تريدين مهراً لكِ؟</b>\n\nاكتبي الرقم فقط، مثال: <code>10000000</code> أو <code>10 مليون</code>"
-
-# ───────────────────────── Rate limit (per user) ─────────────────────────
-rate_limit = defaultdict(list)
-rate_lock = Lock()
-RATE_LIMIT_WINDOW = 60
-RATE_LIMIT_MAX = 20
-
-
-def check_rate_limit(key) -> bool:
-    now = time.time()
-    with rate_lock:
-        rate_limit[key] = [t for t in rate_limit[key] if now - t < RATE_LIMIT_WINDOW]
-        if len(rate_limit[key]) >= RATE_LIMIT_MAX:
-            return False
-        rate_limit[key].append(now)
-        return True
-
-
-# ───────────────────────── Database ─────────────────────────
-db_pool = None
-pool_lock = Lock()
-
-
-def init_pool() -> bool:
-    global db_pool
-    if not DATABASE_URL:
-        logger.error("DATABASE_URL not set")
-        return False
-    with pool_lock:
-        if db_pool is not None:
-            return True
-        try:
-            db_pool = pool.SimpleConnectionPool(
-                1, 10, DATABASE_URL,
-                connect_timeout=8,
-                keepalives=1, keepalives_idle=30,
-                keepalives_interval=10, keepalives_count=5,
-            )
-            logger.info("✅ Connection pool ready")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Pool error: {e}")
-            return False
+# ───────────────────────── قاعدة البيانات ─────────────────────────
+pool = None
 
 
 @contextmanager
-def db_cursor():
-    """يعطي cursor ويعمل commit/rollback ويرجّع الاتصال للـ pool تلقائياً."""
-    if db_pool is None and not init_pool():
-        raise RuntimeError("Database pool unavailable")
-    conn = db_pool.getconn()
-    broken = False
+def cursor():
+    conn = pool.getconn()
     try:
-        cur = conn.cursor()
-        yield cur
-        conn.commit()
-        cur.close()
-    except psycopg2.OperationalError:
-        broken = True
-        raise
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            broken = True
-        raise
+        with conn:  # commit / rollback تلقائي
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                yield cur
     finally:
-        db_pool.putconn(conn, close=broken)
+        pool.putconn(conn)
+
+
+RESERVE_SQL = """
+    UPDATE shop_product
+    SET reserved_by = %s, reserved_until = NOW() + (%s * INTERVAL '1 minute')
+    WHERE id = 1 AND stock > 0
+      AND (reserved_by IS NULL OR reserved_until < NOW() OR reserved_by = %s)
+    RETURNING id
+"""
 
 
 def init_db():
-    try:
-        with db_cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS mahr_users (
-                    user_id BIGINT PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    state TEXT,
-                    mahr_amount BIGINT,
-                    raw_answer TEXT,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    answered_at TIMESTAMP
-                )
-            """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_mahr_amount ON mahr_users(mahr_amount)")
-        logger.info("✅ Database ready")
-    except Exception as e:
-        logger.error(f"❌ init_db error: {e}")
-
-
-def upsert_user(user_id, username, first_name):
-    with db_cursor() as cur:
+    global pool
+    pool = ThreadedConnectionPool(1, 8, DATABASE_URL, connect_timeout=10)
+    with cursor() as cur:
         cur.execute("""
-            INSERT INTO mahr_users (user_id, username, first_name)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id) DO UPDATE
-            SET username = EXCLUDED.username, first_name = EXCLUDED.first_name
-        """, (user_id, username or "", first_name or ""))
-
-
-def set_state(user_id, state):
-    with db_cursor() as cur:
-        cur.execute("UPDATE mahr_users SET state = %s WHERE user_id = %s", (state, user_id))
-
-
-def get_user(user_id):
-    with db_cursor() as cur:
-        cur.execute("SELECT state, mahr_amount FROM mahr_users WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-    return {"state": row[0], "amount": row[1]} if row else None
-
-
-def save_answer(user_id, amount, raw_text):
-    with db_cursor() as cur:
-        cur.execute("""
-            UPDATE mahr_users
-            SET mahr_amount = %s, raw_answer = %s, answered_at = NOW(), state = NULL
-            WHERE user_id = %s
-        """, (amount, raw_text[:200], user_id))
-
-
-def get_stats():
-    with db_cursor() as cur:
-        cur.execute("SELECT mahr_amount FROM mahr_users WHERE mahr_amount IS NOT NULL")
-        amounts = [r[0] for r in cur.fetchall()]
-        cur.execute("SELECT COUNT(*) FROM mahr_users")
-        total_users = cur.fetchone()[0]
-    return total_users, amounts
-
-
-def get_all_answers():
-    with db_cursor() as cur:
-        cur.execute("""
-            SELECT user_id, username, first_name, mahr_amount, raw_answer, answered_at
-            FROM mahr_users WHERE mahr_amount IS NOT NULL
-            ORDER BY answered_at DESC
+            CREATE TABLE IF NOT EXISTS shop_product (
+                id INT PRIMARY KEY,
+                stock INT NOT NULL DEFAULT 1,
+                reserved_by BIGINT,
+                reserved_until TIMESTAMPTZ
+            )
         """)
+        cur.execute("INSERT INTO shop_product (id, stock) VALUES (1, 1) ON CONFLICT DO NOTHING")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shop_orders (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                phone TEXT,
+                wilaya TEXT,
+                address TEXT,
+                amount INT,
+                status TEXT DEFAULT 'pending',
+                charge_id TEXT UNIQUE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                paid_at TIMESTAMPTZ
+            )
+        """)
+    log.info("DB ready")
+
+
+def availability(user_id):
+    """available / held (محجوزة لزبون آخر) / sold"""
+    with cursor() as cur:
+        cur.execute("""
+            SELECT stock,
+                   (reserved_by IS NOT NULL AND reserved_until > NOW() AND reserved_by <> %s) AS held
+            FROM shop_product WHERE id = 1
+        """, (user_id,))
+        r = cur.fetchone()
+    if not r or r["stock"] <= 0:
+        return "sold"
+    return "held" if r["held"] else "available"
+
+
+def reserve(user_id):
+    with cursor() as cur:
+        cur.execute(RESERVE_SQL, (user_id, RESERVE_MINUTES, user_id))
+        return cur.fetchone() is not None
+
+
+def create_order(user, phone, wilaya, address):
+    with cursor() as cur:
+        cur.execute("UPDATE shop_orders SET status='cancelled' WHERE user_id=%s AND status='pending'", (user.id,))
+        cur.execute("""
+            INSERT INTO shop_orders (user_id, username, full_name, phone, wilaya, address, amount)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+        """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address, PRICE_STARS))
+        return cur.fetchone()["id"]
+
+
+def hold_for_payment(order_id, user_id):
+    """يُستدعى في pre_checkout: يتأكد أن الطلب صالح ويمدّد الحجز."""
+    with cursor() as cur:
+        cur.execute("SELECT status, user_id FROM shop_orders WHERE id=%s", (order_id,))
+        o = cur.fetchone()
+        if not o or o["status"] != "pending" or o["user_id"] != user_id:
+            return False
+        cur.execute(RESERVE_SQL, (user_id, RESERVE_MINUTES, user_id))
+        return cur.fetchone() is not None
+
+
+def mark_paid(order_id, charge_id):
+    """returns (status, order) : ok / soldout / dup / invalid"""
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_orders WHERE id=%s FOR UPDATE", (order_id,))
+        o = cur.fetchone()
+        if not o:
+            return "invalid", None
+        if o["status"] in ("paid", "shipped"):
+            return "dup", o
+        if o["status"] != "pending":
+            return "invalid", o
+        cur.execute("""
+            UPDATE shop_product SET stock = stock - 1, reserved_by = NULL, reserved_until = NULL
+            WHERE id = 1 AND stock > 0 RETURNING stock
+        """)
+        if cur.fetchone() is None:
+            return "soldout", o
+        cur.execute("""
+            UPDATE shop_orders SET status='paid', charge_id=%s, paid_at=NOW()
+            WHERE id=%s RETURNING *
+        """, (charge_id, order_id))
+        return "ok", cur.fetchone()
+
+
+def set_order(order_id, status, charge_id=None):
+    with cursor() as cur:
+        if charge_id:
+            cur.execute("UPDATE shop_orders SET status=%s, charge_id=%s WHERE id=%s", (status, charge_id, order_id))
+        else:
+            cur.execute("UPDATE shop_orders SET status=%s WHERE id=%s", (status, order_id))
+
+
+def get_order(order_id):
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_orders WHERE id=%s", (order_id,))
+        return cur.fetchone()
+
+
+def list_orders(limit=10):
+    with cursor() as cur:
+        cur.execute("""
+            SELECT * FROM shop_orders
+            WHERE status IN ('paid','shipped','refunded')
+            ORDER BY id DESC LIMIT %s
+        """, (limit,))
         return cur.fetchall()
 
 
-# ───────────────────────── Helpers ─────────────────────────
-_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+def add_stock(n):
+    with cursor() as cur:
+        cur.execute("UPDATE shop_product SET stock=%s, reserved_by=NULL, reserved_until=NULL WHERE id=1", (n,))
 
 
-def parse_amount(text: str):
-    """يحوّل نص مثل '10 مليون' أو '١٠٠٠٠٠٠٠' أو '10,000,000' إلى رقم صحيح. يرجع None إذا فشل."""
-    t = text.translate(_DIGITS).lower()
-    t = t.replace(",", "").replace("٬", "").replace("٫", ".").replace("،", "")
-    m = re.search(r"\d+(?:\.\d+)?", t)
-    if not m:
-        return None
-    number = float(m.group())
-    multiplier = 1
-    if re.search(r"مليار|بليون|billion", t):
-        multiplier = 1_000_000_000
-    elif re.search(r"مليون|ملايين|million", t):
-        multiplier = 1_000_000
-    elif re.search(r"ألف|الف|آلاف|الاف|thousand", t):
-        multiplier = 1_000
-    value = int(round(number * multiplier))
-    if value < MIN_AMOUNT or value > MAX_AMOUNT:
-        return None
-    return value
+def release_stock_one():
+    with cursor() as cur:
+        cur.execute("UPDATE shop_product SET stock = stock + 1 WHERE id = 1")
 
 
-def fmt(n) -> str:
-    return f"{int(n):,}"
-
-
-def esc(s) -> str:
+# ───────────────────────── نصوص ─────────────────────────
+def esc(s):
     return html.escape(str(s or ""))
 
 
-# ───────────────────────── Telegram API ─────────────────────────
-def send_message(chat_id, text, reply_markup=None):
-    if not chat_id or not text:
-        return False
-    try:
-        payload = {
-            "chat_id": int(chat_id),
-            "text": text[:4096],
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=REQUEST_TIMEOUT)
-        return r.json().get("ok", False)
-    except Exception as e:
-        logger.error(f"send_message error: {e}")
-        return False
-
-
-def answer_callback(callback_id, text=""):
-    try:
-        requests.post(
-            f"{TELEGRAM_API}/answerCallbackQuery",
-            json={"callback_query_id": callback_id, "text": text[:200]},
-            timeout=REQUEST_TIMEOUT,
-        )
-    except Exception as e:
-        logger.error(f"answer_callback error: {e}")
-
-
-def send_document(chat_id, filename, content_bytes, caption=""):
-    try:
-        requests.post(
-            f"{TELEGRAM_API}/sendDocument",
-            data={"chat_id": int(chat_id), "caption": caption},
-            files={"document": (filename, content_bytes)},
-            timeout=30,
-        )
-    except Exception as e:
-        logger.error(f"send_document error: {e}")
-
-
-def set_webhook() -> bool:
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN is not set")
-        return False
-    if not PUBLIC_URL:
-        logger.warning("⚠️ PUBLIC_URL / RAILWAY_PUBLIC_DOMAIN not set - webhook not registered")
-        return False
-    url = f"{PUBLIC_URL}/webhook/{BOT_TOKEN}"
-    try:
-        payload = {"url": url, "allowed_updates": ["message", "callback_query"]}
-        if WEBHOOK_SECRET:
-            payload["secret_token"] = WEBHOOK_SECRET
-        r = requests.post(f"{TELEGRAM_API}/setWebhook", json=payload, timeout=REQUEST_TIMEOUT)
-        ok = r.json().get("ok", False)
-        logger.info(f"{'✅ Webhook registered' if ok else '❌ setWebhook failed'}: {r.text[:200]}")
-        return ok
-    except Exception as e:
-        logger.error(f"❌ setWebhook error: {e}")
-        return False
-
-
-def is_admin(user_id) -> bool:
-    return bool(ADMIN_CHAT_ID) and str(user_id) == str(ADMIN_CHAT_ID)
-
-
-# ───────────────────────── Keyboards ─────────────────────────
-def edit_keyboard():
-    return {"inline_keyboard": [[{"text": "✏️ تعديل إجابتي", "callback_data": "edit_answer"}]]}
-
-
-# ───────────────────────── Bot logic ─────────────────────────
-def ask_question(chat_id, user_id):
-    set_state(user_id, "waiting_amount")
-    send_message(chat_id, QUESTION)
-
-
-def handle_amount_answer(chat_id, user_id, text):
-    amount = parse_amount(text)
-    if amount is None:
-        send_message(
-            chat_id,
-            "❌ لم أفهم الرقم، اكتبيه بالأرقام فقط من فضلك.\nمثال: <code>10000000</code> أو <code>10 مليون</code>",
-        )
-        return
-    save_answer(user_id, amount, text)
-    send_message(
-        chat_id,
-        f"✅ تم حفظ إجابتك\n\n💍 المهر المطلوب: <b>{fmt(amount)}</b>\n\nشكراً لكِ 🌸",
-        edit_keyboard(),
-    )
-    # إشعار للأدمن
-    if ADMIN_CHAT_ID and not is_admin(user_id):
-        send_message(ADMIN_CHAT_ID, f"🆕 إجابة جديدة: <b>{fmt(amount)}</b>")
-
-
-def handle_admin_stats(chat_id):
-    total_users, amounts = get_stats()
-    if not amounts:
-        send_message(chat_id, f"🛠 <b>لوحة الأدمن</b>\n\nالمستخدمات: {total_users}\nلا توجد إجابات بعد.")
-        return
-    send_message(
-        chat_id,
-        "🛠 <b>إحصائيات</b>\n\n"
-        f"👥 إجمالي المستخدمات: <b>{total_users}</b>\n"
-        f"📝 عدد الإجابات: <b>{len(amounts)}</b>\n"
-        f"📊 المتوسط: <b>{fmt(statistics.mean(amounts))}</b>\n"
-        f"📍 الوسيط: <b>{fmt(statistics.median(amounts))}</b>\n"
-        f"⬇️ الأقل: <b>{fmt(min(amounts))}</b>\n"
-        f"⬆️ الأعلى: <b>{fmt(max(amounts))}</b>",
+def order_text(o):
+    return (
+        f"📦 <b>طلب #{o['id']}</b> — {esc(o['status'])}\n"
+        f"👤 {esc(o['full_name'])} (@{esc(o['username'])}) — ID: <code>{o['user_id']}</code>\n"
+        f"📱 +{esc(o['phone'])}\n"
+        f"📍 {esc(o['wilaya'])}\n"
+        f"🏠 {esc(o['address'])}\n"
+        f"💰 {o['amount']}⭐"
     )
 
 
-def handle_admin_export(chat_id):
-    rows = get_all_answers()
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["user_id", "username", "first_name", "mahr_amount", "raw_answer", "answered_at"])
-    for r in rows:
-        writer.writerow(r)
-    # utf-8-sig ليفتح العربي صح في Excel
-    send_document(chat_id, "mahr_answers.csv", buf.getvalue().encode("utf-8-sig"), f"{len(rows)} إجابة")
+UNAVAILABLE = {
+    "sold": "❌ للأسف، نفدت الكمية. القطعة الوحيدة تم بيعها.",
+    "held": "⏳ القطعة محجوزة حالياً لزبون آخر (يدفع الآن). جرّب بعد عدة دقائق، فقد تعود متاحة.",
+}
 
 
-def handle_message(msg):
-    chat = msg.get("chat", {})
-    chat_id = chat.get("id")
-    sender = msg.get("from", {})
-    user_id = sender.get("id")
-    text = (msg.get("text") or "").strip()
+def wilaya_keyboard():
+    rows, row = [], []
+    for i, name in enumerate(WILAYAS, start=1):
+        row.append(InlineKeyboardButton(f"{i:02d} {name}", callback_data=f"w_{i}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel")])
+    return InlineKeyboardMarkup(rows)
 
-    if not user_id or not chat_id or chat.get("type") != "private":
-        return
-    if not check_rate_limit(user_id):
-        return
 
-    upsert_user(user_id, sender.get("username"), sender.get("first_name"))
-
-    if text.startswith("/start"):
-        send_message(chat_id, "أهلاً بكِ 🌸")
-        ask_question(chat_id, user_id)
-        return
-
-    if text == "/myanswer":
-        u = get_user(user_id)
-        if u and u["amount"]:
-            send_message(chat_id, f"💍 إجابتك المحفوظة: <b>{fmt(u['amount'])}</b>", edit_keyboard())
-        else:
-            send_message(chat_id, "لم تجيبي بعد. اضغطي /start للبدء.")
-        return
-
-    if text == "/stats" and is_admin(user_id):
-        handle_admin_stats(chat_id)
-        return
-
-    if text == "/export" and is_admin(user_id):
-        handle_admin_export(chat_id)
-        return
-
-    if text.startswith("/"):
-        return
-
-    user = get_user(user_id)
-    if user and user["state"] == "waiting_amount":
-        handle_amount_answer(chat_id, user_id, text)
+# ───────────────────────── /start ─────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    state = availability(uid)
+    text = (
+        f"🛠 <b>{esc(PRODUCT_NAME)}</b>\n\n"
+        f"{esc(PRODUCT_DESC)}\n\n"
+        f"💰 السعر: <b>{PRICE_STARS} ⭐</b> (نجوم تيليجرام)\n"
+        f"📦 المتوفر: <b>قطعة واحدة فقط</b>\n"
+        f"🇩🇿 البيع والتوصيل داخل الجزائر فقط\n\n"
+    )
+    markup = None
+    if state == "available":
+        text += "اضغط الزر أدناه لإتمام الطلب 👇"
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 اشتري الآن", callback_data="buy")]])
     else:
-        send_message(chat_id, "اضغطي /start للإجابة على السؤال، أو /myanswer لعرض إجابتك.")
+        text += UNAVAILABLE[state]
+
+    if PRODUCT_PHOTO_URL:
+        try:
+            await update.message.reply_photo(PRODUCT_PHOTO_URL, caption=text, reply_markup=markup)
+            return ConversationHandler.END
+        except Exception as e:
+            log.warning("photo failed: %s", e)
+    await update.message.reply_text(text, reply_markup=markup)
+    return ConversationHandler.END
 
 
-def handle_callback(cq):
-    sender = cq.get("from", {})
-    user_id = sender.get("id")
-    chat_id = cq.get("message", {}).get("chat", {}).get("id")
-    answer_callback(cq.get("id"))
-    if not user_id or not chat_id:
+# ───────────────────────── خطوات الطلب ─────────────────────────
+async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    state = availability(q.from_user.id)
+    if state != "available":
+        await q.message.reply_text(UNAVAILABLE[state])
+        return ConversationHandler.END
+    context.user_data.clear()
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 مشاركة رقم هاتفي", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await q.message.reply_text(
+        "🇩🇿 للتأكد أنك من الجزائر، شارك رقم هاتفك بالضغط على الزر أدناه.\n"
+        "(يجب أن يكون الرقم جزائري +213 ومرتبط بحسابك)",
+        reply_markup=kb,
+    )
+    return PHONE
+
+
+async def got_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c = update.message.contact
+    if c.user_id != update.effective_user.id:
+        await update.message.reply_text("⚠️ يرجى مشاركة رقمك أنت، وليس رقم شخص آخر.")
+        return PHONE
+    phone = "".join(ch for ch in c.phone_number if ch.isdigit())
+    if not (phone.startswith("213") and len(phone) == 12):
+        await update.message.reply_text(
+            "🚫 عذراً، البيع متاح فقط لأصحاب أرقام الهاتف الجزائرية (+213).",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+    context.user_data["phone"] = phone
+    await update.message.reply_text("✅ تم التحقق من رقمك.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("📍 اختر ولايتك:", reply_markup=wilaya_keyboard())
+    return WILAYA
+
+
+async def phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("اضغط على زر «📱 مشاركة رقم هاتفي» أسفل الشاشة، أو /cancel للإلغاء.")
+    return PHONE
+
+
+async def got_wilaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    idx = int(q.data.split("_")[1])
+    context.user_data["wilaya"] = f"{idx:02d} - {WILAYAS[idx - 1]}"
+    await q.message.edit_text(
+        f"📍 الولاية: <b>{esc(WILAYAS[idx - 1])}</b>\n\n"
+        "🏠 الآن اكتب عنوانك الكامل للتوصيل:\n"
+        "البلدية، الحي، الشارع، رقم المنزل، وأي علامة مميزة."
+    )
+    return ADDRESS
+
+
+async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    addr = update.message.text.strip()
+    if len(addr) < 10 or len(addr) > 300:
+        await update.message.reply_text("⚠️ العنوان قصير جداً أو طويل جداً. اكتب عنواناً واضحاً (10 – 300 حرف).")
+        return ADDRESS
+    context.user_data["address"] = addr
+    d = context.user_data
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 تأكيد والدفع {PRICE_STARS}⭐", callback_data="pay")],
+        [InlineKeyboardButton("✏️ تعديل الولاية/العنوان", callback_data="restart")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")],
+    ])
+    await update.message.reply_text(
+        "📋 <b>راجع بياناتك:</b>\n\n"
+        f"📱 +{esc(d['phone'])}\n"
+        f"📍 {esc(d['wilaya'])}\n"
+        f"🏠 {esc(d['address'])}\n\n"
+        f"💰 المبلغ: <b>{PRICE_STARS}⭐</b>",
+        reply_markup=kb,
+    )
+    return CONFIRM
+
+
+async def restart_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.message.reply_text("📍 اختر ولايتك:", reply_markup=wilaya_keyboard())
+    return WILAYA
+
+
+async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = context.user_data
+    uid = q.from_user.id
+    if not all(k in d for k in ("phone", "wilaya", "address")):
+        await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        return ConversationHandler.END
+    if not reserve(uid):
+        await q.message.reply_text(UNAVAILABLE.get(availability(uid), UNAVAILABLE["sold"]))
+        return ConversationHandler.END
+    oid = create_order(q.from_user, d["phone"], d["wilaya"], d["address"])
+    await q.message.reply_text(f"⏳ القطعة محجوزة لك لمدة {RESERVE_MINUTES} دقائق. أكمل الدفع من الفاتورة أدناه 👇")
+    await context.bot.send_invoice(
+        chat_id=q.message.chat_id,
+        title=PRODUCT_NAME[:32],
+        description=f"{PRODUCT_NAME} — توصيل داخل الجزائر"[:255],
+        payload=f"order_{oid}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(PRODUCT_NAME[:32], PRICE_STARS)],
+    )
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text("تم إلغاء الطلب. اكتب /start للبدء من جديد.", reply_markup=ReplyKeyboardRemove())
+    else:
+        await update.message.reply_text("تم إلغاء الطلب. اكتب /start للبدء من جديد.", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+
+# ───────────────────────── الدفع ─────────────────────────
+def parse_order_id(payload):
+    try:
+        return int(payload.split("_")[1])
+    except Exception:
+        return None
+
+
+async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.pre_checkout_query
+    oid = parse_order_id(q.invoice_payload)
+    ok = (
+        oid is not None
+        and q.currency == "XTR"
+        and q.total_amount == PRICE_STARS
+        and hold_for_payment(oid, q.from_user.id)
+    )
+    if ok:
+        await q.answer(ok=True)
+    else:
+        await q.answer(ok=False, error_message="عذراً، القطعة لم تعد متاحة أو انتهت مهلة الحجز.")
+
+
+async def notify_admin(context, text):
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(ADMIN_ID, text)
+        except Exception as e:
+            log.error("admin notify failed: %s", e)
+
+
+async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sp = update.message.successful_payment
+    uid = update.effective_user.id
+    oid = parse_order_id(sp.invoice_payload)
+    charge = sp.telegram_payment_charge_id
+    status, order = mark_paid(oid, charge) if oid else ("invalid", None)
+
+    if status == "ok":
+        await update.message.reply_text(
+            f"✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>\n"
+            "سنتواصل معك على رقمك لتأكيد التوصيل قريباً. شكراً لثقتك 🙏"
+        )
+        await notify_admin(context, "🔔 <b>طلب مدفوع جديد!</b>\n\n" + order_text(order))
+    elif status == "dup":
         return
-    if cq.get("data") == "edit_answer":
-        upsert_user(user_id, sender.get("username"), sender.get("first_name"))
-        ask_question(chat_id, user_id)
+    else:
+        # دُفع لكن القطعة لم تعد متاحة → استرجاع تلقائي
+        try:
+            await context.bot.refund_star_payment(user_id=uid, telegram_payment_charge_id=charge)
+            if oid:
+                set_order(oid, "refunded", charge)
+            await update.message.reply_text("⚠️ نعتذر، القطعة بيعت للتو. تم استرجاع نجومك بالكامل ✅")
+            await notify_admin(context, f"⚠️ دفع متأخر للطلب #{oid} (القطعة بيعت) — تم الاسترجاع تلقائياً.")
+        except Exception as e:
+            log.error("auto refund failed: %s", e)
+            await update.message.reply_text("⚠️ حدثت مشكلة، سيتواصل معك المشرف لاسترجاع نجومك.")
+            await notify_admin(
+                context,
+                f"🚨 <b>يلزم استرجاع يدوي</b>\nالمستخدم: <code>{uid}</code>\ncharge_id: <code>{esc(charge)}</code>\nالخطأ: {esc(e)}",
+            )
 
 
-# ───────────────────────── Webhook ─────────────────────────
-@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-        return jsonify({"ok": False}), 403
+# ───────────────────────── أوامر الأدمن ─────────────────────────
+def is_admin(update):
+    return update.effective_user and update.effective_user.id == ADMIN_ID
 
-    update = request.get_json(force=True, silent=True) or {}
+
+async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    orders = list_orders()
+    if not orders:
+        await update.message.reply_text("لا توجد طلبات مدفوعة بعد.")
+        return
+    for o in orders:
+        await update.message.reply_text(order_text(o))
+
+
+async def cmd_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update) or not context.args:
+        return
+    o = get_order(int(context.args[0]))
+    if not o or o["status"] != "paid":
+        await update.message.reply_text("الطلب غير موجود أو غير مدفوع.")
+        return
+    set_order(o["id"], "shipped")
+    await update.message.reply_text(f"✅ الطلب #{o['id']} أصبح «تم الشحن».")
     try:
-        if "message" in update:
-            handle_message(update["message"])
-        elif "callback_query" in update:
-            handle_callback(update["callback_query"])
-    except Exception as e:
-        # نرجّع 200 دائماً حتى لا يعيد تلقرام إرسال نفس التحديث بلا نهاية
-        logger.exception(f"update handling error: {e}")
-    return jsonify({"ok": True})
+        await context.bot.send_message(o["user_id"], f"🚚 طلبك #{o['id']} في الطريق إليك! سيتصل بك المُوصِّل قريباً.")
+    except Exception:
+        pass
 
 
-# ───────────────────────── Health / diagnostics ─────────────────────────
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "bot_token_set": bool(BOT_TOKEN),
-        "database_url_set": bool(DATABASE_URL),
-        "admin_chat_id_set": bool(ADMIN_CHAT_ID),
-        "public_url": PUBLIC_URL or None,
-    })
-
-
-@app.route("/webhook_info")
-def webhook_info():
-    if not BOT_TOKEN:
-        return jsonify({"error": "BOT_TOKEN not set"}), 500
+async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update) or not context.args:
+        return
+    o = get_order(int(context.args[0]))
+    if not o or o["status"] not in ("paid", "shipped") or not o["charge_id"]:
+        await update.message.reply_text("لا يمكن استرجاع هذا الطلب.")
+        return
     try:
-        r = requests.get(f"{TELEGRAM_API}/getWebhookInfo", timeout=REQUEST_TIMEOUT)
-        info = r.json()
-        # لا نعرض التوكن في الرابط
-        if isinstance(info.get("result"), dict) and info["result"].get("url"):
-            info["result"]["url"] = info["result"]["url"].replace(BOT_TOKEN, "<TOKEN>")
-        return jsonify(info)
+        await context.bot.refund_star_payment(user_id=o["user_id"], telegram_payment_charge_id=o["charge_id"])
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        await update.message.reply_text(f"فشل الاسترجاع: {esc(e)}")
+        return
+    if o["status"] == "paid":
+        release_stock_one()
+    set_order(o["id"], "refunded")
+    await update.message.reply_text(f"💸 تم استرجاع {o['amount']}⭐ للطلب #{o['id']}.")
+    try:
+        await context.bot.send_message(o["user_id"], f"💸 تم استرجاع نجوم الطلب #{o['id']} إلى حسابك.")
+    except Exception:
+        pass
 
 
-# ───────────────────────── Startup ─────────────────────────
-# يعمل مع gunicorn أيضاً (وليس فقط python app.py)
-init_db()
-set_webhook()
+async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update) or not context.args:
+        return
+    add_stock(max(0, int(context.args[0])))
+    await update.message.reply_text(f"تم ضبط المخزون على {int(context.args[0])}.")
+
+
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled error", exc_info=context.error)
+
+
+# ───────────────────────── تشغيل ─────────────────────────
+def main():
+    init_db()
+    app = Application.builder().token(BOT_TOKEN).defaults(Defaults(parse_mode=ParseMode.HTML)).build()
+
+    conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(buy_cb, pattern="^buy$")],
+        states={
+            PHONE: [
+                MessageHandler(filters.CONTACT, got_phone),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, phone_text),
+            ],
+            WILAYA: [CallbackQueryHandler(got_wilaya, pattern=r"^w_\d+$")],
+            ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_address)],
+            CONFIRM: [
+                CallbackQueryHandler(pay_cb, pattern="^pay$"),
+                CallbackQueryHandler(restart_cb, pattern="^restart$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start),
+            CallbackQueryHandler(cancel, pattern="^cancel$"),
+        ],
+        allow_reentry=True,
+    )
+
+    app.add_handler(conv)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
+    app.add_handler(CommandHandler("orders", cmd_orders))
+    app.add_handler(CommandHandler("shipped", cmd_shipped))
+    app.add_handler(CommandHandler("refund", cmd_refund))
+    app.add_handler(CommandHandler("stock", cmd_stock))
+    app.add_error_handler(on_error)
+
+    log.info("Bot started (polling)")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Bot running on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    main()
