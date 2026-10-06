@@ -1,6 +1,9 @@
 import os
 import html
+import time
+import sqlite3
 import logging
+import threading
 from contextlib import contextmanager
 
 import psycopg2
@@ -21,14 +24,14 @@ log = logging.getLogger("shop-bot")
 
 # ───────────────────────── الإعدادات ─────────────────────────
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
+ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "0") or 0)
 
 PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "آلة لحام بلاستيك PFS-300")
-PRODUCT_DESC = os.environ.get("PRODUCT_DESC", "آلة لحام بلاستيك PFS-300 — جاهزة للاستعمال.")
-PRODUCT_PHOTO_URL = os.environ.get("PRODUCT_PHOTO_URL", "")  # اختياري: رابط صورة أو file_id
+DEFAULT_DESC = os.environ.get("PRODUCT_DESC", "آلة لحام بلاستيك PFS-300 — جاهزة للاستعمال.")
+ENV_PHOTO = os.environ.get("PRODUCT_PHOTO_URL", "")  # اختياري (الأفضل رفع الصورة من البوت)
 PRICE_STARS = int(os.environ.get("PRICE_STARS", "5000"))
 RESERVE_MINUTES = 10
+DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
 PHONE, WILAYA, ADDRESS, CONFIRM = range(4)
 
@@ -41,46 +44,83 @@ WILAYAS = [
     "برج باجي مختار", "أولاد جلال", "بني عباس", "عين صالح", "عين قزام", "تقرت", "جانت", "المغير", "المنيعة",
 ]
 
-# ───────────────────────── قاعدة البيانات ─────────────────────────
+# ───────────────────────── قاعدة البيانات (PostgreSQL أو SQLite تلقائياً) ─────────────────────────
+USE_PG = False
 pool = None
+sqlite_conn = None
+sqlite_lock = threading.RLock()
+
+
+class Cur:
+    """غلاف موحّد: يكتب الاستعلامات بـ ? ويحوّلها لـ %s عند PostgreSQL."""
+
+    def __init__(self, cur, pg):
+        self.cur, self.pg = cur, pg
+
+    def execute(self, sql, params=()):
+        if self.pg:
+            sql = sql.replace("?", "%s")
+        self.cur.execute(sql, params)
+
+    def fetchone(self):
+        r = self.cur.fetchone()
+        return dict(r) if r is not None else None
+
+    def fetchall(self):
+        return [dict(r) for r in self.cur.fetchall()]
 
 
 @contextmanager
 def cursor():
-    conn = pool.getconn()
-    try:
-        with conn:  # commit / rollback تلقائي
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                yield cur
-    finally:
-        pool.putconn(conn)
-
-
-RESERVE_SQL = """
-    UPDATE shop_product
-    SET reserved_by = %s, reserved_until = NOW() + (%s * INTERVAL '1 minute')
-    WHERE id = 1 AND stock > 0
-      AND (reserved_by IS NULL OR reserved_until < NOW() OR reserved_by = %s)
-    RETURNING id
-"""
+    if USE_PG:
+        conn = pool.getconn()
+        try:
+            with conn:  # commit / rollback تلقائي
+                with conn.cursor(cursor_factory=RealDictCursor) as c:
+                    yield Cur(c, True)
+        finally:
+            pool.putconn(conn, close=bool(conn.closed))
+    else:
+        with sqlite_lock:
+            with sqlite_conn:
+                c = sqlite_conn.cursor()
+                try:
+                    yield Cur(c, False)
+                finally:
+                    c.close()
 
 
 def init_db():
-    global pool
-    pool = ThreadedConnectionPool(1, 8, DATABASE_URL, connect_timeout=10)
+    global USE_PG, pool, sqlite_conn
+    urls = [os.environ.get("DATABASE_URL"), os.environ.get("DATABASE_PUBLIC_URL")]
+    for u in [x for x in urls if x]:
+        try:
+            pool = ThreadedConnectionPool(1, 8, u, connect_timeout=8)
+            USE_PG = True
+            log.info("Connected to PostgreSQL")
+            break
+        except Exception as e:
+            log.warning("PostgreSQL connection failed: %s", str(e).strip()[:150])
+
+    if not USE_PG:
+        sqlite_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        sqlite_conn.row_factory = sqlite3.Row
+        log.warning("Using SQLite file: %s", os.path.abspath(DB_PATH))
+
+    pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
     with cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS shop_product (
                 id INT PRIMARY KEY,
                 stock INT NOT NULL DEFAULT 1,
                 reserved_by BIGINT,
-                reserved_until TIMESTAMPTZ
+                reserved_until BIGINT
             )
         """)
         cur.execute("INSERT INTO shop_product (id, stock) VALUES (1, 1) ON CONFLICT DO NOTHING")
-        cur.execute("""
+        cur.execute(f"""
             CREATE TABLE IF NOT EXISTS shop_orders (
-                id SERIAL PRIMARY KEY,
+                id {pk},
                 user_id BIGINT NOT NULL,
                 username TEXT,
                 full_name TEXT,
@@ -90,58 +130,98 @@ def init_db():
                 amount INT,
                 status TEXT DEFAULT 'pending',
                 charge_id TEXT UNIQUE,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                paid_at TIMESTAMPTZ
+                created_at BIGINT,
+                paid_at BIGINT
             )
         """)
-    log.info("DB ready")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shop_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+    log.info("DB ready (%s)", "PostgreSQL" if USE_PG else "SQLite")
+
+
+# ── الإعدادات (صورة المنتج + الوصف) ──
+def get_setting(key, default=""):
+    with cursor() as cur:
+        cur.execute("SELECT value FROM shop_settings WHERE key=?", (key,))
+        r = cur.fetchone()
+    return r["value"] if r and r["value"] else default
+
+
+def set_setting(key, value):
+    with cursor() as cur:
+        if value is None:
+            cur.execute("DELETE FROM shop_settings WHERE key=?", (key,))
+        else:
+            cur.execute("""
+                INSERT INTO shop_settings (key, value) VALUES (?, ?)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (key, value))
+
+
+# ── المخزون والحجز ──
+RESERVE_SQL = """
+    UPDATE shop_product SET reserved_by = ?, reserved_until = ?
+    WHERE id = 1 AND stock > 0
+      AND (reserved_by IS NULL OR reserved_until < ? OR reserved_by = ?)
+    RETURNING id
+"""
+
+
+def _reserve_params(user_id):
+    now = int(time.time())
+    return (user_id, now + RESERVE_MINUTES * 60, now, user_id)
 
 
 def availability(user_id):
     """available / held (محجوزة لزبون آخر) / sold"""
     with cursor() as cur:
-        cur.execute("""
-            SELECT stock,
-                   (reserved_by IS NOT NULL AND reserved_until > NOW() AND reserved_by <> %s) AS held
-            FROM shop_product WHERE id = 1
-        """, (user_id,))
+        cur.execute("SELECT stock, reserved_by, reserved_until FROM shop_product WHERE id = 1")
         r = cur.fetchone()
     if not r or r["stock"] <= 0:
         return "sold"
-    return "held" if r["held"] else "available"
+    held = (
+        r["reserved_by"] is not None
+        and (r["reserved_until"] or 0) > int(time.time())
+        and r["reserved_by"] != user_id
+    )
+    return "held" if held else "available"
 
 
 def reserve(user_id):
     with cursor() as cur:
-        cur.execute(RESERVE_SQL, (user_id, RESERVE_MINUTES, user_id))
+        cur.execute(RESERVE_SQL, _reserve_params(user_id))
         return cur.fetchone() is not None
 
 
 def create_order(user, phone, wilaya, address):
     with cursor() as cur:
-        cur.execute("UPDATE shop_orders SET status='cancelled' WHERE user_id=%s AND status='pending'", (user.id,))
+        cur.execute("UPDATE shop_orders SET status='cancelled' WHERE user_id=? AND status='pending'", (user.id,))
         cur.execute("""
-            INSERT INTO shop_orders (user_id, username, full_name, phone, wilaya, address, amount)
-            VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
-        """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address, PRICE_STARS))
+            INSERT INTO shop_orders (user_id, username, full_name, phone, wilaya, address, amount, created_at)
+            VALUES (?,?,?,?,?,?,?,?) RETURNING id
+        """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address, PRICE_STARS, int(time.time())))
         return cur.fetchone()["id"]
 
 
 def hold_for_payment(order_id, user_id):
     """يُستدعى في pre_checkout: يتأكد أن الطلب صالح ويمدّد الحجز."""
     with cursor() as cur:
-        cur.execute("SELECT status, user_id FROM shop_orders WHERE id=%s", (order_id,))
+        cur.execute("SELECT status, user_id FROM shop_orders WHERE id=?", (order_id,))
         o = cur.fetchone()
         if not o or o["status"] != "pending" or o["user_id"] != user_id:
             return False
-        cur.execute(RESERVE_SQL, (user_id, RESERVE_MINUTES, user_id))
+        cur.execute(RESERVE_SQL, _reserve_params(user_id))
         return cur.fetchone() is not None
 
 
 def mark_paid(order_id, charge_id):
     """returns (status, order) : ok / soldout / dup / invalid"""
     with cursor() as cur:
-        cur.execute("SELECT * FROM shop_orders WHERE id=%s FOR UPDATE", (order_id,))
+        cur.execute("SELECT * FROM shop_orders WHERE id=?" + (" FOR UPDATE" if USE_PG else ""), (order_id,))
         o = cur.fetchone()
         if not o:
             return "invalid", None
@@ -156,23 +236,23 @@ def mark_paid(order_id, charge_id):
         if cur.fetchone() is None:
             return "soldout", o
         cur.execute("""
-            UPDATE shop_orders SET status='paid', charge_id=%s, paid_at=NOW()
-            WHERE id=%s RETURNING *
-        """, (charge_id, order_id))
+            UPDATE shop_orders SET status='paid', charge_id=?, paid_at=?
+            WHERE id=? RETURNING *
+        """, (charge_id, int(time.time()), order_id))
         return "ok", cur.fetchone()
 
 
 def set_order(order_id, status, charge_id=None):
     with cursor() as cur:
         if charge_id:
-            cur.execute("UPDATE shop_orders SET status=%s, charge_id=%s WHERE id=%s", (status, charge_id, order_id))
+            cur.execute("UPDATE shop_orders SET status=?, charge_id=? WHERE id=?", (status, charge_id, order_id))
         else:
-            cur.execute("UPDATE shop_orders SET status=%s WHERE id=%s", (status, order_id))
+            cur.execute("UPDATE shop_orders SET status=? WHERE id=?", (status, order_id))
 
 
 def get_order(order_id):
     with cursor() as cur:
-        cur.execute("SELECT * FROM shop_orders WHERE id=%s", (order_id,))
+        cur.execute("SELECT * FROM shop_orders WHERE id=?", (order_id,))
         return cur.fetchone()
 
 
@@ -181,14 +261,14 @@ def list_orders(limit=10):
         cur.execute("""
             SELECT * FROM shop_orders
             WHERE status IN ('paid','shipped','refunded')
-            ORDER BY id DESC LIMIT %s
+            ORDER BY id DESC LIMIT ?
         """, (limit,))
         return cur.fetchall()
 
 
 def add_stock(n):
     with cursor() as cur:
-        cur.execute("UPDATE shop_product SET stock=%s, reserved_by=NULL, reserved_until=NULL WHERE id=1", (n,))
+        cur.execute("UPDATE shop_product SET stock=?, reserved_by=NULL, reserved_until=NULL WHERE id=1", (n,))
 
 
 def release_stock_one():
@@ -235,9 +315,10 @@ def wilaya_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     state = availability(uid)
+    desc = get_setting("desc", DEFAULT_DESC)
     text = (
         f"🛠 <b>{esc(PRODUCT_NAME)}</b>\n\n"
-        f"{esc(PRODUCT_DESC)}\n\n"
+        f"{esc(desc)}\n\n"
         f"💰 السعر: <b>{PRICE_STARS} ⭐</b> (نجوم تيليجرام)\n"
         f"📦 المتوفر: <b>قطعة واحدة فقط</b>\n"
         f"🇩🇿 البيع والتوصيل داخل الجزائر فقط\n\n"
@@ -249,9 +330,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += UNAVAILABLE[state]
 
-    if PRODUCT_PHOTO_URL:
+    photo = get_setting("photo", ENV_PHOTO)
+    if photo:
         try:
-            await update.message.reply_photo(PRODUCT_PHOTO_URL, caption=text, reply_markup=markup)
+            if len(text) <= 1000:
+                await update.message.reply_photo(photo, caption=text, reply_markup=markup)
+            else:
+                await update.message.reply_photo(photo)
+                await update.message.reply_text(text, reply_markup=markup)
             return ConversationHandler.END
         except Exception as e:
             log.warning("photo failed: %s", e)
@@ -446,7 +532,34 @@ async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ───────────────────────── أوامر الأدمن ─────────────────────────
 def is_admin(update):
-    return update.effective_user and update.effective_user.id == ADMIN_ID
+    return bool(update.effective_user) and ADMIN_ID != 0 and update.effective_user.id == ADMIN_ID
+
+
+async def admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الأدمن يرسل أي صورة للبوت → تصبح صورة المنتج."""
+    if not is_admin(update):
+        return
+    file_id = update.message.photo[-1].file_id
+    set_setting("photo", file_id)
+    await update.message.reply_text("✅ تم حفظ صورة المنتج. اكتب /start لترى النتيجة.\n(لحذفها: /delphoto)")
+
+
+async def cmd_delphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    set_setting("photo", None)
+    await update.message.reply_text("🗑 تم حذف صورة المنتج.")
+
+
+async def cmd_setdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text("الاستعمال: <code>/setdesc وصف الآلة هنا</code>")
+        return
+    set_setting("desc", text[:700])
+    await update.message.reply_text("✅ تم تحديث وصف المنتج.")
 
 
 async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,14 +617,55 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"تم ضبط المخزون على {int(context.args[0])}.")
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    await update.message.reply_text(
+        "🛠 <b>أوامر الأدمن</b>\n\n"
+        "📷 أرسل أي صورة للبوت ← تصبح صورة المنتج\n"
+        "/delphoto — حذف الصورة\n"
+        "/setdesc نص — تغيير وصف المنتج\n"
+        "/orders — الطلبات المدفوعة\n"
+        "/shipped رقم — تم الشحن\n"
+        "/refund رقم — استرجاع النجوم\n"
+        "/stock عدد — ضبط المخزون"
+    )
+
+
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled error", exc_info=context.error)
+
+
+async def post_init(app: Application):
+    if not ADMIN_ID:
+        return
+    msg = "✅ البوت يعمل.\n"
+    if USE_PG:
+        msg += "🗄 قاعدة البيانات: PostgreSQL"
+    else:
+        msg += f"🗄 قاعدة البيانات: SQLite ({os.path.abspath(DB_PATH)})"
+        if not os.path.abspath(DB_PATH).startswith("/data"):
+            msg += (
+                "\n\n⚠️ الملف مؤقت: عند إعادة النشر قد يرجع المخزون إلى 1 وتضيع الصورة. "
+                "بعد بيع القطعة اكتب <code>/stock 0</code>، أو اربط Volume على /data وضع DB_PATH=/data/shop.db"
+            )
+    msg += "\n\nاكتب /help لعرض الأوامر."
+    try:
+        await app.bot.send_message(ADMIN_ID, msg)
+    except Exception as e:
+        log.warning("startup notice failed: %s", e)
 
 
 # ───────────────────────── تشغيل ─────────────────────────
 def main():
     init_db()
-    app = Application.builder().token(BOT_TOKEN).defaults(Defaults(parse_mode=ParseMode.HTML)).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .defaults(Defaults(parse_mode=ParseMode.HTML))
+        .post_init(post_init)
+        .build()
+    )
 
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(buy_cb, pattern="^buy$")],
@@ -539,6 +693,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
+    app.add_handler(MessageHandler(filters.PHOTO, admin_photo))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("delphoto", cmd_delphoto))
+    app.add_handler(CommandHandler("setdesc", cmd_setdesc))
     app.add_handler(CommandHandler("orders", cmd_orders))
     app.add_handler(CommandHandler("shipped", cmd_shipped))
     app.add_handler(CommandHandler("refund", cmd_refund))
