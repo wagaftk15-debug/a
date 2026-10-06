@@ -20,6 +20,8 @@ from telegram.ext import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # حتى لا يظهر التوكن في اللوغ
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("shop-bot")
 
 # ───────────────────────── الإعدادات ─────────────────────────
@@ -140,6 +142,21 @@ def init_db():
                 value TEXT
             )
         """)
+    # ترحيل: النسخة الأولى أنشأت أعمدة الوقت بنوع TIMESTAMPTZ، والآن نستعمل أرقاماً (epoch)
+    if USE_PG:
+        with cursor() as cur:
+            for tbl, col in (("shop_product", "reserved_until"), ("shop_orders", "created_at"), ("shop_orders", "paid_at")):
+                cur.execute(
+                    "SELECT data_type FROM information_schema.columns WHERE table_name=? AND column_name=?",
+                    (tbl, col),
+                )
+                r = cur.fetchone()
+                if r and str(r["data_type"]).startswith("timestamp"):
+                    cur.execute(f"ALTER TABLE {tbl} ALTER COLUMN {col} DROP DEFAULT")
+                    cur.execute(
+                        f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
+                    )
+                    log.info("Migrated %s.%s to BIGINT", tbl, col)
     log.info("DB ready (%s)", "PostgreSQL" if USE_PG else "SQLite")
 
 
