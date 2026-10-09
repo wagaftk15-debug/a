@@ -12,7 +12,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, LabeledPrice,
-    BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputMediaPhoto,
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputMediaPhoto, InputMediaVideo,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -149,7 +149,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS shop_photos (
                 id {pk},
                 product_id INT NOT NULL,
-                file_id TEXT NOT NULL
+                file_id TEXT NOT NULL,
+                kind TEXT DEFAULT 'photo'
             )
         """)
         cur.execute(f"""
@@ -179,6 +180,7 @@ def init_db():
     ensure_column("shop_orders", "product_id", "INT")
     ensure_column("shop_orders", "product_name", "TEXT")
     ensure_column("shop_orders", "reserved_until", "BIGINT")
+    ensure_column("shop_photos", "kind", "TEXT DEFAULT 'photo'")
 
     if USE_PG:
         with cursor() as cur:
@@ -277,9 +279,16 @@ def get_photos(pid):
         return [r["file_id"] for r in cur.fetchall()]
 
 
-def add_photo(pid, file_id):
+def get_media(pid):
+    """صور وفيديوهات المنتج: [{'file_id':..., 'kind':'photo'|'video'}]"""
     with cursor() as cur:
-        cur.execute("INSERT INTO shop_photos (product_id, file_id) VALUES (?,?)", (pid, file_id))
+        cur.execute("SELECT file_id, kind FROM shop_photos WHERE product_id=? ORDER BY id", (pid,))
+        return [{"file_id": r["file_id"], "kind": r["kind"] or "photo"} for r in cur.fetchall()]
+
+
+def add_photo(pid, file_id, kind="photo"):
+    with cursor() as cur:
+        cur.execute("INSERT INTO shop_photos (product_id, file_id, kind) VALUES (?,?,?)", (pid, file_id, kind))
 
 
 def clear_photos(pid):
@@ -495,17 +504,22 @@ async def show_product(message, p, uid):
         rows.append([InlineKeyboardButton("🔙 كل المنتجات", callback_data="list")])
     markup = InlineKeyboardMarkup(rows) if rows else None
 
-    photos = get_photos(p["id"])[:MAX_PHOTOS]
+    media = get_media(p["id"])[:MAX_PHOTOS]
     try:
-        if len(photos) == 1:
+        if len(media) == 1:
+            m = media[0]
+            send = message.reply_video if m["kind"] == "video" else message.reply_photo
             if len(text) <= 1000:
-                await message.reply_photo(photos[0], caption=text, reply_markup=markup)
+                await send(m["file_id"], caption=text, reply_markup=markup)
                 return
-            await message.reply_photo(photos[0])
-        elif len(photos) >= 2:
-            await message.reply_media_group([InputMediaPhoto(f) for f in photos])
+            await send(m["file_id"])
+        elif len(media) >= 2:
+            await message.reply_media_group([
+                InputMediaVideo(m["file_id"]) if m["kind"] == "video" else InputMediaPhoto(m["file_id"])
+                for m in media
+            ])
     except Exception as e:
-        log.warning("photo failed: %s", e)
+        log.warning("media failed: %s", e)
     await message.reply_text(text, reply_markup=markup)
 
 
@@ -777,7 +791,7 @@ def panel_text(p):
         f"النوع: {'🚚 مادي (شحن + ولايات)' if p['shipping'] else '💾 رقمي (بدون شحن)'}\n"
         f"💰 السعر: {p['price']}⭐\n"
         f"📦 المخزون: {stock_label(p['stock'])}\n"
-        f"📷 الصور: {n}\n"
+        f"📷 الوسائط (صور/فيديو): {n}\n"
         f"الحالة: {'✅ ظاهر للزبائن' if p['active'] else '🚫 مخفي'}\n"
     )
     if not p["shipping"]:
@@ -797,8 +811,8 @@ def panel_markup(p):
          InlineKeyboardButton("📝 الوصف", callback_data=f"edt_desc_{i}")],
         [InlineKeyboardButton("💰 السعر", callback_data=f"edt_price_{i}"),
          InlineKeyboardButton("📊 المخزون", callback_data=f"edt_stock_{i}")],
-        [InlineKeyboardButton("📷 تغيير الصور", callback_data=f"edt_photos_{i}"),
-         InlineKeyboardButton("🧹 مسح الصور", callback_data=f"adm_clrphotos_{i}")],
+        [InlineKeyboardButton("📷 تغيير الصور/الفيديو", callback_data=f"edt_photos_{i}"),
+         InlineKeyboardButton("🧹 مسح الوسائط", callback_data=f"adm_clrphotos_{i}")],
         [InlineKeyboardButton("🔁 تحويل إلى رقمي" if p["shipping"] else "🔁 تحويل إلى مادي (شحن)",
                               callback_data=f"adm_ship_{i}")],
     ]
@@ -969,8 +983,8 @@ async def create_draft(update, context, desc):
     a = adm(context)
     a["pid"] = add_product(a["name"], desc, a["price"], a["stock"], a["shipping"], active=0)
     await update.message.reply_text(
-        f"📷 أرسل <b>صور المنتج</b> (حتى {MAX_PHOTOS}، كصور وليس كملفات).\n"
-        "عند الانتهاء اكتب /done — أو /skip إذا لا تريد صوراً."
+        f"📷 أرسل <b>صور و/أو فيديوهات المنتج</b> (حتى {MAX_PHOTOS} في المجموع، كصور/فيديو وليس كملفات).\n"
+        "عند الانتهاء اكتب /done — أو /skip إذا لا تريد وسائط."
     )
     return A_PHOTOS
 
@@ -992,13 +1006,18 @@ async def got_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if n >= MAX_PHOTOS:
         await update.message.reply_text(f"⚠️ الحد الأقصى {MAX_PHOTOS} صور. اكتب /done للمتابعة.")
         return A_PHOTOS
-    add_photo(pid, update.message.photo[-1].file_id)
-    await update.message.reply_text(f"✅ تمت إضافة الصورة ({n + 1}/{MAX_PHOTOS}). أرسل غيرها أو اكتب /done.")
+    if update.message.video:
+        add_photo(pid, update.message.video.file_id, "video")
+        what = "الفيديو"
+    else:
+        add_photo(pid, update.message.photo[-1].file_id, "photo")
+        what = "الصورة"
+    await update.message.reply_text(f"✅ تمت إضافة {what} ({n + 1}/{MAX_PHOTOS}). أرسل غيرها أو اكتب /done.")
     return A_PHOTOS
 
 
 async def photos_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ أرسل صورة (كصورة وليس كملف)، أو /done للمتابعة.")
+    await update.message.reply_text("⚠️ أرسل صورة أو فيديو (وليس كملف)، أو /done للمتابعة.")
     return A_PHOTOS
 
 
@@ -1072,7 +1091,7 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if field == "photos":
         context.user_data["adm"]["replace"] = True
         await q.message.reply_text(
-            f"📷 أرسل الصور الجديدة (حتى {MAX_PHOTOS}) — ستستبدل القديمة.\nعند الانتهاء: /done  |  للإبقاء على القديمة: /skip"
+            f"📷 أرسل الصور/الفيديوهات الجديدة (حتى {MAX_PHOTOS}) — ستستبدل القديمة.\nعند الانتهاء: /done  |  للإبقاء على القديمة: /skip"
         )
         return A_PHOTOS
     if field == "deliv":
@@ -1275,7 +1294,7 @@ def main():
                 MessageHandler(text_only, got_desc),
             ],
             A_PHOTOS: [
-                MessageHandler(filters.PHOTO, got_photo),
+                MessageHandler(filters.PHOTO | filters.VIDEO, got_photo),
                 CommandHandler(["done", "skip"], photos_done),
                 MessageHandler(text_only, photos_wrong),
             ],
