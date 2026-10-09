@@ -12,7 +12,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, LabeledPrice,
-    BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputMediaPhoto,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -21,7 +21,7 @@ from telegram.ext import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logging.getLogger("httpx").setLevel(logging.WARNING)  # حتى لا يظهر التوكن في اللوغ
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("shop-bot")
 
@@ -29,15 +29,20 @@ log = logging.getLogger("shop-bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "0") or 0)
 
+# تُستعمل فقط لإنشاء أول منتج تلقائياً (إذا كانت قاعدة البيانات فارغة)
 PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "آلة لحام بلاستيك PFS-300")
 DEFAULT_DESC = os.environ.get("PRODUCT_DESC", "آلة لحام بلاستيك PFS-300 — جاهزة للاستعمال.")
-ENV_PHOTO = os.environ.get("PRODUCT_PHOTO_URL", "")  # اختياري (الأفضل رفع الصورة من البوت)
+ENV_PHOTO = os.environ.get("PRODUCT_PHOTO_URL", "")
 PRICE_STARS = int(os.environ.get("PRICE_STARS", "5000"))
+
 RESERVE_MINUTES = 10
+MAX_PHOTOS = 10
 DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
+# حالات طلب الزبون
 PHONE, WILAYA, ADDRESS, CONFIRM = range(4)
-WAIT_PHOTO = 10
+# حالات الأدمن
+A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE = range(20, 28)
 
 WILAYAS = [
     "أدرار", "الشلف", "الأغواط", "أم البواقي", "باتنة", "بجاية", "بسكرة", "بشار", "البليدة", "البويرة",
@@ -48,7 +53,7 @@ WILAYAS = [
     "برج باجي مختار", "أولاد جلال", "بني عباس", "عين صالح", "عين قزام", "تقرت", "جانت", "المغير", "المنيعة",
 ]
 
-# ───────────────────────── قاعدة البيانات (PostgreSQL أو SQLite تلقائياً) ─────────────────────────
+# ───────────────────────── قاعدة البيانات ─────────────────────────
 USE_PG = False
 pool = None
 sqlite_conn = None
@@ -56,7 +61,7 @@ sqlite_lock = threading.RLock()
 
 
 class Cur:
-    """غلاف موحّد: يكتب الاستعلامات بـ ? ويحوّلها لـ %s عند PostgreSQL."""
+    """غلاف موحّد: الاستعلامات بـ ? وتتحول لـ %s عند PostgreSQL."""
 
     def __init__(self, cur, pg):
         self.cur, self.pg = cur, pg
@@ -79,7 +84,7 @@ def cursor():
     if USE_PG:
         conn = pool.getconn()
         try:
-            with conn:  # commit / rollback تلقائي
+            with conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as c:
                     yield Cur(c, True)
         finally:
@@ -92,6 +97,19 @@ def cursor():
                     yield Cur(c, False)
                 finally:
                     c.close()
+
+
+def ensure_column(table, col, typ):
+    if USE_PG:
+        with cursor() as cur:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
+    else:
+        with cursor() as cur:
+            cur.execute(f"PRAGMA table_info({table})")
+            cols = [r["name"] for r in cur.fetchall()]
+        if col not in cols:
+            with cursor() as cur:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def init_db():
@@ -113,15 +131,27 @@ def init_db():
 
     pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
     with cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS shop_product (
-                id INT PRIMARY KEY,
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS shop_products (
+                id {pk},
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                price INT NOT NULL,
                 stock INT NOT NULL DEFAULT 1,
-                reserved_by BIGINT,
-                reserved_until BIGINT
+                shipping INT NOT NULL DEFAULT 1,
+                delivery_text TEXT,
+                delivery_file TEXT,
+                active INT NOT NULL DEFAULT 1,
+                created_at BIGINT
             )
         """)
-        cur.execute("INSERT INTO shop_product (id, stock) VALUES (1, 1) ON CONFLICT DO NOTHING")
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS shop_photos (
+                id {pk},
+                product_id INT NOT NULL,
+                file_id TEXT NOT NULL
+            )
+        """)
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS shop_orders (
                 id {pk},
@@ -144,10 +174,15 @@ def init_db():
                 value TEXT
             )
         """)
-    # ترحيل: النسخة الأولى أنشأت أعمدة الوقت بنوع TIMESTAMPTZ، والآن نستعمل أرقاماً (epoch)
+
+    # ترحيل أعمدة الطلبات القديمة
+    ensure_column("shop_orders", "product_id", "INT")
+    ensure_column("shop_orders", "product_name", "TEXT")
+    ensure_column("shop_orders", "reserved_until", "BIGINT")
+
     if USE_PG:
         with cursor() as cur:
-            for tbl, col in (("shop_product", "reserved_until"), ("shop_orders", "created_at"), ("shop_orders", "paid_at")):
+            for tbl, col in (("shop_orders", "created_at"), ("shop_orders", "paid_at")):
                 cur.execute(
                     "SELECT data_type FROM information_schema.columns WHERE table_name=? AND column_name=?",
                     (tbl, col),
@@ -158,83 +193,167 @@ def init_db():
                     cur.execute(
                         f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
                     )
-                    log.info("Migrated %s.%s to BIGINT", tbl, col)
+
+    # أول تشغيل: أنشئ منتجاً افتراضياً (من المنتج القديم إن وُجد)
+    with cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM shop_products")
+        n = cur.fetchone()["n"]
+    if n == 0:
+        stock = 1
+        try:
+            with cursor() as cur:
+                cur.execute("SELECT stock FROM shop_product WHERE id=1")
+                r = cur.fetchone()
+                if r:
+                    stock = r["stock"]
+        except Exception:
+            pass
+        pid = add_product(PRODUCT_NAME, get_setting("desc", DEFAULT_DESC), PRICE_STARS, stock, 1, 1)
+        photo = get_setting("photo", ENV_PHOTO)
+        if photo:
+            add_photo(pid, photo)
+        log.info("Created default product #%s", pid)
+
     log.info("DB ready (%s)", "PostgreSQL" if USE_PG else "SQLite")
 
 
-# ── الإعدادات (صورة المنتج + الوصف) ──
+# ── الإعدادات القديمة (للترحيل فقط) ──
 def get_setting(key, default=""):
+    try:
+        with cursor() as cur:
+            cur.execute("SELECT value FROM shop_settings WHERE key=?", (key,))
+            r = cur.fetchone()
+        return r["value"] if r and r["value"] else default
+    except Exception:
+        return default
+
+
+# ── المنتجات ──
+PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active"}
+
+
+def add_product(name, desc, price, stock, shipping, active=1):
     with cursor() as cur:
-        cur.execute("SELECT value FROM shop_settings WHERE key=?", (key,))
-        r = cur.fetchone()
-    return r["value"] if r and r["value"] else default
-
-
-def set_setting(key, value):
-    with cursor() as cur:
-        if value is None:
-            cur.execute("DELETE FROM shop_settings WHERE key=?", (key,))
-        else:
-            cur.execute("""
-                INSERT INTO shop_settings (key, value) VALUES (?, ?)
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-            """, (key, value))
-
-
-# ── المخزون والحجز ──
-RESERVE_SQL = """
-    UPDATE shop_product SET reserved_by = ?, reserved_until = ?
-    WHERE id = 1 AND stock > 0
-      AND (reserved_by IS NULL OR reserved_until < ? OR reserved_by = ?)
-    RETURNING id
-"""
-
-
-def _reserve_params(user_id):
-    now = int(time.time())
-    return (user_id, now + RESERVE_MINUTES * 60, now, user_id)
-
-
-def availability(user_id):
-    """available / held (محجوزة لزبون آخر) / sold"""
-    with cursor() as cur:
-        cur.execute("SELECT stock, reserved_by, reserved_until FROM shop_product WHERE id = 1")
-        r = cur.fetchone()
-    if not r or r["stock"] <= 0:
-        return "sold"
-    held = (
-        r["reserved_by"] is not None
-        and (r["reserved_until"] or 0) > int(time.time())
-        and r["reserved_by"] != user_id
-    )
-    return "held" if held else "available"
-
-
-def reserve(user_id):
-    with cursor() as cur:
-        cur.execute(RESERVE_SQL, _reserve_params(user_id))
-        return cur.fetchone() is not None
-
-
-def create_order(user, phone, wilaya, address):
-    with cursor() as cur:
-        cur.execute("UPDATE shop_orders SET status='cancelled' WHERE user_id=? AND status='pending'", (user.id,))
         cur.execute("""
-            INSERT INTO shop_orders (user_id, username, full_name, phone, wilaya, address, amount, created_at)
-            VALUES (?,?,?,?,?,?,?,?) RETURNING id
-        """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address, PRICE_STARS, int(time.time())))
+            INSERT INTO shop_products (name, description, price, stock, shipping, active, created_at)
+            VALUES (?,?,?,?,?,?,?) RETURNING id
+        """, (name, desc or "", price, stock, shipping, active, int(time.time())))
         return cur.fetchone()["id"]
 
 
-def hold_for_payment(order_id, user_id):
-    """يُستدعى في pre_checkout: يتأكد أن الطلب صالح ويمدّد الحجز."""
+def get_product(pid):
     with cursor() as cur:
-        cur.execute("SELECT status, user_id FROM shop_orders WHERE id=?", (order_id,))
+        cur.execute("SELECT * FROM shop_products WHERE id=?", (pid,))
+        return cur.fetchone()
+
+
+def list_products(only_active=True):
+    with cursor() as cur:
+        if only_active:
+            cur.execute("SELECT * FROM shop_products WHERE active=1 ORDER BY id")
+        else:
+            cur.execute("SELECT * FROM shop_products ORDER BY id")
+        return cur.fetchall()
+
+
+def update_product(pid, **fields):
+    fields = {k: v for k, v in fields.items() if k in PRODUCT_FIELDS}
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    with cursor() as cur:
+        cur.execute(f"UPDATE shop_products SET {sets} WHERE id=?", (*fields.values(), pid))
+
+
+def delete_product(pid):
+    with cursor() as cur:
+        cur.execute("DELETE FROM shop_photos WHERE product_id=?", (pid,))
+        cur.execute("DELETE FROM shop_products WHERE id=?", (pid,))
+
+
+def get_photos(pid):
+    with cursor() as cur:
+        cur.execute("SELECT file_id FROM shop_photos WHERE product_id=? ORDER BY id", (pid,))
+        return [r["file_id"] for r in cur.fetchall()]
+
+
+def add_photo(pid, file_id):
+    with cursor() as cur:
+        cur.execute("INSERT INTO shop_photos (product_id, file_id) VALUES (?,?)", (pid, file_id))
+
+
+def clear_photos(pid):
+    with cursor() as cur:
+        cur.execute("DELETE FROM shop_photos WHERE product_id=?", (pid,))
+
+
+# ── المخزون والحجز (الحجز = طلبات pending لم تنتهِ مهلتها) ──
+def _held_by_others(cur, pid, uid):
+    cur.execute("""
+        SELECT COUNT(*) AS n FROM shop_orders
+        WHERE product_id=? AND status='pending' AND reserved_until > ? AND user_id <> ?
+    """, (pid, int(time.time()), uid))
+    return cur.fetchone()["n"]
+
+
+def _lock_product(cur, pid):
+    cur.execute("SELECT * FROM shop_products WHERE id=?" + (" FOR UPDATE" if USE_PG else ""), (pid,))
+    return cur.fetchone()
+
+
+def availability(pid, uid):
+    """available / held (محجوز لزبون آخر) / sold. المخزون -1 = غير محدود."""
+    p = get_product(pid)
+    if not p or not p["active"] or p["stock"] == 0:
+        return "sold"
+    if p["stock"] < 0:
+        return "available"
+    with cursor() as cur:
+        held = _held_by_others(cur, pid, uid)
+    return "available" if p["stock"] - held > 0 else "held"
+
+
+def place_order(user, pid, phone, wilaya, address):
+    """ينشئ الطلب ويحجز القطعة. returns (order_id, 'ok') أو (None, 'sold'/'held')"""
+    with cursor() as cur:
+        p = _lock_product(cur, pid)
+        if not p or not p["active"] or p["stock"] == 0:
+            return None, "sold"
+        if p["stock"] > 0 and p["stock"] - _held_by_others(cur, pid, user.id) <= 0:
+            return None, "held"
+        cur.execute(
+            "UPDATE shop_orders SET status='cancelled' WHERE user_id=? AND product_id=? AND status='pending'",
+            (user.id, pid),
+        )
+        now = int(time.time())
+        cur.execute("""
+            INSERT INTO shop_orders
+              (user_id, username, full_name, phone, wilaya, address, amount, created_at,
+               product_id, product_name, reserved_until)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id
+        """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address,
+              p["price"], now, pid, p["name"], now + RESERVE_MINUTES * 60))
+        return cur.fetchone()["id"], "ok"
+
+
+def hold_for_payment(order_id, user_id):
+    """pre_checkout: يتأكد أن الطلب صالح ويمدّد الحجز. يرجع الطلب أو None."""
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_orders WHERE id=?", (order_id,))
         o = cur.fetchone()
         if not o or o["status"] != "pending" or o["user_id"] != user_id:
-            return False
-        cur.execute(RESERVE_SQL, _reserve_params(user_id))
-        return cur.fetchone() is not None
+            return None
+        if o["product_id"]:
+            p = _lock_product(cur, o["product_id"])
+            if not p or not p["active"] or p["stock"] == 0:
+                return None
+            if p["stock"] > 0 and p["stock"] - _held_by_others(cur, p["id"], user_id) <= 0:
+                return None
+        cur.execute(
+            "UPDATE shop_orders SET reserved_until=? WHERE id=?",
+            (int(time.time()) + RESERVE_MINUTES * 60, order_id),
+        )
+        return o
 
 
 def mark_paid(order_id, charge_id):
@@ -248,12 +367,17 @@ def mark_paid(order_id, charge_id):
             return "dup", o
         if o["status"] != "pending":
             return "invalid", o
-        cur.execute("""
-            UPDATE shop_product SET stock = stock - 1, reserved_by = NULL, reserved_until = NULL
-            WHERE id = 1 AND stock > 0 RETURNING stock
-        """)
-        if cur.fetchone() is None:
-            return "soldout", o
+        if o["product_id"]:
+            p = _lock_product(cur, o["product_id"])
+            if not p or p["stock"] == 0:
+                return "soldout", o
+            if p["stock"] > 0:
+                cur.execute(
+                    "UPDATE shop_products SET stock = stock - 1 WHERE id=? AND stock > 0 RETURNING stock",
+                    (o["product_id"],),
+                )
+                if cur.fetchone() is None:
+                    return "soldout", o
         cur.execute("""
             UPDATE shop_orders SET status='paid', charge_id=?, paid_at=?
             WHERE id=? RETURNING *
@@ -285,14 +409,9 @@ def list_orders(limit=10):
         return cur.fetchall()
 
 
-def add_stock(n):
+def restock_one(pid):
     with cursor() as cur:
-        cur.execute("UPDATE shop_product SET stock=?, reserved_by=NULL, reserved_until=NULL WHERE id=1", (n,))
-
-
-def release_stock_one():
-    with cursor() as cur:
-        cur.execute("UPDATE shop_product SET stock = stock + 1 WHERE id = 1")
+        cur.execute("UPDATE shop_products SET stock = stock + 1 WHERE id=? AND stock >= 0", (pid,))
 
 
 # ───────────────────────── نصوص ─────────────────────────
@@ -300,19 +419,28 @@ def esc(s):
     return html.escape(str(s or ""))
 
 
+def stock_label(stock):
+    return "غير محدود" if stock < 0 else str(stock)
+
+
 def order_text(o):
-    return (
+    name = o.get("product_name") or PRODUCT_NAME
+    uname = f"@{esc(o['username'])}" if o.get("username") else "—"
+    t = (
         f"📦 <b>طلب #{o['id']}</b> — {esc(o['status'])}\n"
-        f"👤 {esc(o['full_name'])} (@{esc(o['username'])}) — ID: <code>{o['user_id']}</code>\n"
-        f"📱 +{esc(o['phone'])}\n"
-        f"📍 {esc(o['wilaya'])}\n"
-        f"🏠 {esc(o['address'])}\n"
-        f"💰 {o['amount']}⭐"
+        f"🛍 {esc(name)}\n"
+        f"👤 {esc(o['full_name'])} ({uname}) — ID: <code>{o['user_id']}</code>\n"
     )
+    if o.get("wilaya"):
+        t += f"📱 +{esc(o['phone'])}\n📍 {esc(o['wilaya'])}\n🏠 {esc(o['address'])}\n"
+    else:
+        t += "💾 منتج رقمي\n"
+    t += f"💰 {o['amount']}⭐"
+    return t
 
 
 UNAVAILABLE = {
-    "sold": "❌ للأسف، نفدت الكمية. القطعة الوحيدة تم بيعها.",
+    "sold": "❌ للأسف، نفدت الكمية.",
     "held": "⏳ القطعة محجوزة حالياً لزبون آخر (يدفع الآن). جرّب بعد عدة دقائق، فقد تعود متاحة.",
 }
 
@@ -330,49 +458,122 @@ def wilaya_keyboard():
     return InlineKeyboardMarkup(rows)
 
 
-# ───────────────────────── /start ─────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    state = availability(uid)
-    desc = get_setting("desc", DEFAULT_DESC)
-    text = (
-        f"🛠 <b>{esc(PRODUCT_NAME)}</b>\n\n"
-        f"{esc(desc)}\n\n"
-        f"💰 السعر: <b>{PRICE_STARS} ⭐</b> (نجوم تيليجرام)\n"
-        f"📦 المتوفر: <b>قطعة واحدة فقط</b>\n"
-        f"🇩🇿 البيع والتوصيل داخل الجزائر فقط\n\n"
-    )
-    markup = None
+# ───────────────────────── واجهة الزبون ─────────────────────────
+def is_admin(update):
+    return bool(update.effective_user) and ADMIN_ID != 0 and update.effective_user.id == ADMIN_ID
+
+
+async def show_list(message, prods):
+    rows = []
+    for p in prods:
+        mark = "❌ " if p["stock"] == 0 else ("🛠 " if p["shipping"] else "💾 ")
+        rows.append([InlineKeyboardButton(f"{mark}{p['name'][:40]} — {p['price']}⭐", callback_data=f"prod_{p['id']}")])
+    await message.reply_text("🛍 <b>منتجاتنا</b>\n\nاختر منتجاً لعرض تفاصيله 👇", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def show_product(message, p, uid):
+    state = availability(p["id"], uid)
+    text = f"{'🛠' if p['shipping'] else '💾'} <b>{esc(p['name'])}</b>\n\n"
+    if p["description"]:
+        text += f"{esc(p['description'])}\n\n"
+    text += f"💰 السعر: <b>{p['price']} ⭐</b> (نجوم تيليجرام)\n"
+    if p["shipping"]:
+        if p["stock"] >= 0:
+            text += f"📦 المتوفر: <b>{p['stock']}</b>\n"
+        text += "🇩🇿 البيع والتوصيل داخل الجزائر فقط\n"
+    else:
+        text += "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n"
+    text += "\n"
+
+    rows = []
     if state == "available":
         text += "اضغط الزر أدناه لإتمام الطلب 👇"
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 اشتري الآن", callback_data="buy")]])
+        rows.append([InlineKeyboardButton("🛒 اشتري الآن", callback_data=f"buy_{p['id']}")])
     else:
         text += UNAVAILABLE[state]
+    if len(list_products()) > 1:
+        rows.append([InlineKeyboardButton("🔙 كل المنتجات", callback_data="list")])
+    markup = InlineKeyboardMarkup(rows) if rows else None
 
-    photo = get_setting("photo", ENV_PHOTO)
-    if photo:
-        try:
+    photos = get_photos(p["id"])[:MAX_PHOTOS]
+    try:
+        if len(photos) == 1:
             if len(text) <= 1000:
-                await update.message.reply_photo(photo, caption=text, reply_markup=markup)
-            else:
-                await update.message.reply_photo(photo)
-                await update.message.reply_text(text, reply_markup=markup)
-            return ConversationHandler.END
-        except Exception as e:
-            log.warning("photo failed: %s", e)
-    await update.message.reply_text(text, reply_markup=markup)
+                await message.reply_photo(photos[0], caption=text, reply_markup=markup)
+                return
+            await message.reply_photo(photos[0])
+        elif len(photos) >= 2:
+            await message.reply_media_group([InputMediaPhoto(f) for f in photos])
+    except Exception as e:
+        log.warning("photo failed: %s", e)
+    await message.reply_text(text, reply_markup=markup)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_admin(update):
+        await set_admin_commands(context.bot)
+    prods = list_products()
+    if not prods:
+        await update.message.reply_text("🚧 لا توجد منتجات حالياً.")
+        return ConversationHandler.END
+    if len(prods) == 1:
+        await show_product(update.message, prods[0], update.effective_user.id)
+    else:
+        await show_list(update.message, prods)
     return ConversationHandler.END
 
 
+async def prod_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    p = get_product(int(q.data.split("_")[1]))
+    if not p or not p["active"]:
+        await q.message.reply_text("هذا المنتج لم يعد متوفراً.")
+        return
+    await show_product(q.message, p, q.from_user.id)
+
+
+async def list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    prods = list_products()
+    if prods:
+        await show_list(q.message, prods)
+
+
 # ───────────────────────── خطوات الطلب ─────────────────────────
+async def send_summary(message, context):
+    d = context.user_data
+    p = get_product(d["pid"])
+    rows = [[InlineKeyboardButton(f"💳 تأكيد والدفع {p['price']}⭐", callback_data="pay")]]
+    if p["shipping"]:
+        rows.append([InlineKeyboardButton("✏️ تعديل الولاية/العنوان", callback_data="restart")])
+    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel")])
+    text = f"📋 <b>راجع طلبك:</b>\n\n🛍 {esc(p['name'])}\n"
+    if p["shipping"]:
+        text += f"📱 +{esc(d['phone'])}\n📍 {esc(d['wilaya'])}\n🏠 {esc(d['address'])}\n"
+    else:
+        text += "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n"
+    text += f"\n💰 المبلغ: <b>{p['price']}⭐</b>"
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
 async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    state = availability(q.from_user.id)
+    pid = int(q.data.split("_")[1])
+    state = availability(pid, q.from_user.id)
     if state != "available":
         await q.message.reply_text(UNAVAILABLE[state])
         return ConversationHandler.END
+    p = get_product(pid)
     context.user_data.clear()
+    context.user_data["pid"] = pid
+
+    if not p["shipping"]:  # منتج رقمي: لا هاتف ولا ولاية ولا عنوان
+        await send_summary(q.message, context)
+        return CONFIRM
+
     kb = ReplyKeyboardMarkup(
         [[KeyboardButton("📱 مشاركة رقم هاتفي", request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True,
@@ -427,20 +628,7 @@ async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ العنوان قصير جداً أو طويل جداً. اكتب عنواناً واضحاً (10 – 300 حرف).")
         return ADDRESS
     context.user_data["address"] = addr
-    d = context.user_data
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💳 تأكيد والدفع {PRICE_STARS}⭐", callback_data="pay")],
-        [InlineKeyboardButton("✏️ تعديل الولاية/العنوان", callback_data="restart")],
-        [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")],
-    ])
-    await update.message.reply_text(
-        "📋 <b>راجع بياناتك:</b>\n\n"
-        f"📱 +{esc(d['phone'])}\n"
-        f"📍 {esc(d['wilaya'])}\n"
-        f"🏠 {esc(d['address'])}\n\n"
-        f"💰 المبلغ: <b>{PRICE_STARS}⭐</b>",
-        reply_markup=kb,
-    )
+    await send_summary(update.message, context)
     return CONFIRM
 
 
@@ -455,23 +643,33 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     d = context.user_data
-    uid = q.from_user.id
-    if not all(k in d for k in ("phone", "wilaya", "address")):
+    pid = d.get("pid")
+    p = get_product(pid) if pid else None
+    if not p:
         await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
         return ConversationHandler.END
-    if not reserve(uid):
-        await q.message.reply_text(UNAVAILABLE.get(availability(uid), UNAVAILABLE["sold"]))
+    if p["shipping"] and not all(k in d for k in ("phone", "wilaya", "address")):
+        await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
         return ConversationHandler.END
-    oid = create_order(q.from_user, d["phone"], d["wilaya"], d["address"])
-    await q.message.reply_text(f"⏳ القطعة محجوزة لك لمدة {RESERVE_MINUTES} دقائق. أكمل الدفع من الفاتورة أدناه 👇")
+
+    oid, why = place_order(q.from_user, pid, d.get("phone"), d.get("wilaya"), d.get("address"))
+    if not oid:
+        await q.message.reply_text(UNAVAILABLE.get(why, UNAVAILABLE["sold"]))
+        return ConversationHandler.END
+    order = get_order(oid)
+
+    await q.message.reply_text(f"⏳ تم حجز طلبك لمدة {RESERVE_MINUTES} دقائق. أكمل الدفع من الفاتورة أدناه 👇")
+    desc = (p["description"] or p["name"])
+    if p["shipping"]:
+        desc = f"{p['name']} — توصيل داخل الجزائر"
     await context.bot.send_invoice(
         chat_id=q.message.chat_id,
-        title=PRODUCT_NAME[:32],
-        description=f"{PRODUCT_NAME} — توصيل داخل الجزائر"[:255],
+        title=p["name"][:32],
+        description=desc[:255],
         payload=f"order_{oid}",
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(PRODUCT_NAME[:32], PRICE_STARS)],
+        prices=[LabeledPrice(p["name"][:32], order["amount"])],
     )
     return ConversationHandler.END
 
@@ -497,16 +695,11 @@ def parse_order_id(payload):
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.pre_checkout_query
     oid = parse_order_id(q.invoice_payload)
-    ok = (
-        oid is not None
-        and q.currency == "XTR"
-        and q.total_amount == PRICE_STARS
-        and hold_for_payment(oid, q.from_user.id)
-    )
-    if ok:
+    o = hold_for_payment(oid, q.from_user.id) if (oid is not None and q.currency == "XTR") else None
+    if o is not None and q.total_amount == o["amount"]:
         await q.answer(ok=True)
     else:
-        await q.answer(ok=False, error_message="عذراً، القطعة لم تعد متاحة أو انتهت مهلة الحجز.")
+        await q.answer(ok=False, error_message="عذراً، المنتج لم يعد متاحاً أو انتهت مهلة الحجز.")
 
 
 async def notify_admin(context, text):
@@ -517,6 +710,18 @@ async def notify_admin(context, text):
             log.error("admin notify failed: %s", e)
 
 
+async def deliver_digital(context, chat_id, p):
+    """يرسل المحتوى الرقمي للزبون. يرجع True إذا أُرسل شيء."""
+    sent = False
+    if p.get("delivery_text"):
+        await context.bot.send_message(chat_id, f"🎁 <b>منتجك:</b>\n\n{esc(p['delivery_text'])}")
+        sent = True
+    if p.get("delivery_file"):
+        await context.bot.send_document(chat_id, p["delivery_file"])
+        sent = True
+    return sent
+
+
 async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sp = update.message.successful_payment
     uid = update.effective_user.id
@@ -525,21 +730,32 @@ async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status, order = mark_paid(oid, charge) if oid else ("invalid", None)
 
     if status == "ok":
-        await update.message.reply_text(
-            f"✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>\n"
-            "سنتواصل معك على رقمك لتأكيد التوصيل قريباً. شكراً لثقتك 🙏"
-        )
+        p = get_product(order["product_id"]) if order.get("product_id") else None
+        if p and not p["shipping"]:
+            await update.message.reply_text(f"✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>")
+            ok = False
+            try:
+                ok = await deliver_digital(context, update.effective_chat.id, p)
+            except Exception as e:
+                log.error("digital delivery failed: %s", e)
+            if not ok:
+                await update.message.reply_text("سيصلك المنتج من المشرف قريباً 🙏")
+                await notify_admin(context, f"⚠️ طلب رقمي #{oid} بلا محتوى تسليم! أرسله للزبون يدوياً (ID: <code>{uid}</code>).")
+        else:
+            await update.message.reply_text(
+                f"✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>\n"
+                "سنتواصل معك على رقمك لتأكيد التوصيل قريباً. شكراً لثقتك 🙏"
+            )
         await notify_admin(context, "🔔 <b>طلب مدفوع جديد!</b>\n\n" + order_text(order))
     elif status == "dup":
         return
     else:
-        # دُفع لكن القطعة لم تعد متاحة → استرجاع تلقائي
         try:
             await context.bot.refund_star_payment(user_id=uid, telegram_payment_charge_id=charge)
             if oid:
                 set_order(oid, "refunded", charge)
-            await update.message.reply_text("⚠️ نعتذر، القطعة بيعت للتو. تم استرجاع نجومك بالكامل ✅")
-            await notify_admin(context, f"⚠️ دفع متأخر للطلب #{oid} (القطعة بيعت) — تم الاسترجاع تلقائياً.")
+            await update.message.reply_text("⚠️ نعتذر، المنتج بيع للتو. تم استرجاع نجومك بالكامل ✅")
+            await notify_admin(context, f"⚠️ دفع متأخر للطلب #{oid} (نفدت الكمية) — تم الاسترجاع تلقائياً.")
         except Exception as e:
             log.error("auto refund failed: %s", e)
             await update.message.reply_text("⚠️ حدثت مشكلة، سيتواصل معك المشرف لاسترجاع نجومك.")
@@ -549,55 +765,366 @@ async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-# ───────────────────────── أوامر الأدمن ─────────────────────────
-def is_admin(update):
-    return bool(update.effective_user) and ADMIN_ID != 0 and update.effective_user.id == ADMIN_ID
+# ───────────────────────── لوحة الأدمن: المنتجات ─────────────────────────
+def adm(context):
+    return context.user_data.setdefault("adm", {})
 
 
-# ── /setphoto : اختر الأمر ثم أرسل الصورة ──
-async def cmd_setphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def panel_text(p):
+    n = len(get_photos(p["id"]))
+    t = (
+        f"🗂 <b>{esc(p['name'])}</b>  (#{p['id']})\n\n"
+        f"النوع: {'🚚 مادي (شحن + ولايات)' if p['shipping'] else '💾 رقمي (بدون شحن)'}\n"
+        f"💰 السعر: {p['price']}⭐\n"
+        f"📦 المخزون: {stock_label(p['stock'])}\n"
+        f"📷 الصور: {n}\n"
+        f"الحالة: {'✅ ظاهر للزبائن' if p['active'] else '🚫 مخفي'}\n"
+    )
+    if not p["shipping"]:
+        t += (
+            f"🎁 محتوى التسليم: نص {'✅' if p['delivery_text'] else '❌'} | "
+            f"ملف {'✅' if p['delivery_file'] else '❌'}\n"
+        )
+    if p["description"]:
+        t += f"\n📝 {esc(p['description'][:200])}"
+    return t
+
+
+def panel_markup(p):
+    i = p["id"]
+    rows = [
+        [InlineKeyboardButton("✏️ الاسم", callback_data=f"edt_name_{i}"),
+         InlineKeyboardButton("📝 الوصف", callback_data=f"edt_desc_{i}")],
+        [InlineKeyboardButton("💰 السعر", callback_data=f"edt_price_{i}"),
+         InlineKeyboardButton("📊 المخزون", callback_data=f"edt_stock_{i}")],
+        [InlineKeyboardButton("📷 تغيير الصور", callback_data=f"edt_photos_{i}"),
+         InlineKeyboardButton("🧹 مسح الصور", callback_data=f"adm_clrphotos_{i}")],
+        [InlineKeyboardButton("🔁 تحويل إلى رقمي" if p["shipping"] else "🔁 تحويل إلى مادي (شحن)",
+                              callback_data=f"adm_ship_{i}")],
+    ]
+    if not p["shipping"]:
+        rows.append([InlineKeyboardButton("🎁 محتوى التسليم", callback_data=f"edt_deliv_{i}")])
+    rows.append([InlineKeyboardButton("🚫 إخفاء" if p["active"] else "✅ إظهار", callback_data=f"adm_active_{i}"),
+                 InlineKeyboardButton("❌ حذف", callback_data=f"adm_del_{i}")])
+    rows.append([InlineKeyboardButton("🔙 المنتجات", callback_data="adm_list")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def render_panel(message, pid, edit=False):
+    p = get_product(pid)
+    if not p:
+        await message.reply_text("المنتج غير موجود.")
+        return
+    if edit:
+        try:
+            await message.edit_text(panel_text(p), reply_markup=panel_markup(p))
+            return
+        except Exception:
+            pass
+    await message.reply_text(panel_text(p), reply_markup=panel_markup(p))
+
+
+async def send_products_admin(message):
+    prods = list_products(only_active=False)
+    rows = [[InlineKeyboardButton(
+        f"{'✅' if p['active'] else '🚫'} {'🛠' if p['shipping'] else '💾'} {p['name'][:30]} — {p['price']}⭐",
+        callback_data=f"adm_panel_{p['id']}")] for p in prods]
+    rows.append([InlineKeyboardButton("➕ إضافة منتج", callback_data="adm_new")])
+    await message.reply_text("🗂 <b>المنتجات</b>\nاختر منتجاً لإدارته:", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    await send_products_admin(update.message)
+
+
+async def adm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أزرار الأدمن خارج المحادثات (فتح اللوحة، تبديل، حذف...)."""
+    q = update.callback_query
+    if not is_admin(update):
+        await q.answer()
+        return
+    await q.answer()
+    parts = q.data.split("_")  # adm_<action>_<pid>
+    action, pid = parts[1], int(parts[2])
+    p = get_product(pid)
+    if not p:
+        await q.message.reply_text("المنتج غير موجود.")
+        return
+
+    if action == "panel":
+        await render_panel(q.message, pid)
+    elif action == "ship":
+        new = 0 if p["shipping"] else 1
+        stock = p["stock"]
+        if new == 0 and stock == 0:
+            stock = -1          # رقمي: غير محدود
+        if new == 1 and stock < 0:
+            stock = 1           # مادي: ضع كمية
+        update_product(pid, shipping=new, stock=stock)
+        await render_panel(q.message, pid, edit=True)
+    elif action == "active":
+        update_product(pid, active=0 if p["active"] else 1)
+        await render_panel(q.message, pid, edit=True)
+    elif action == "clrphotos":
+        clear_photos(pid)
+        await render_panel(q.message, pid, edit=True)
+    elif action == "del":
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ نعم، احذف", callback_data=f"adm_delyes_{pid}"),
+            InlineKeyboardButton("🔙 لا", callback_data=f"adm_panel_{pid}"),
+        ]])
+        await q.message.reply_text(f"⚠️ حذف «{esc(p['name'])}» نهائياً؟", reply_markup=kb)
+    elif action == "delyes":
+        delete_product(pid)
+        await q.message.edit_text("🗑 تم حذف المنتج.")
+
+
+async def adm_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if is_admin(update):
+        await send_products_admin(q.message)
+
+
+# ── إضافة منتج (محادثة) ──
+async def begin_new(message, context):
+    context.user_data["adm"] = {"mode": "new"}
+    await message.reply_text("➕ <b>منتج جديد</b>\n\nاكتب <b>اسم المنتج</b>:\n(للإلغاء: /cancel)")
+    return A_NAME
+
+
+async def cmd_addproduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return ConversationHandler.END
-    await update.message.reply_text("📷 أرسل الآن صورة المنتج (كصورة وليس كملف).\nللإلغاء: /cancel")
-    return WAIT_PHOTO
+    return await begin_new(update.message, context)
 
 
-async def got_setphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def new_product_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
     if not is_admin(update):
         return ConversationHandler.END
-    set_setting("photo", update.message.photo[-1].file_id)
-    await update.message.reply_text("✅ تم حفظ صورة المنتج. اكتب /start لترى النتيجة.\n(لحذفها: /delphoto)")
+    return await begin_new(q.message, context)
+
+
+async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    if len(name) < 2 or len(name) > 100:
+        await update.message.reply_text("⚠️ اكتب اسماً من 2 إلى 100 حرف.")
+        return A_NAME
+    adm(context)["name"] = name
+    await update.message.reply_text("💰 اكتب <b>السعر</b> بالنجوم ⭐ (رقم فقط):")
+    return A_PRICE
+
+
+async def got_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = update.message.text.strip()
+    if not t.isdigit() or not (1 <= int(t) <= 1000000):
+        await update.message.reply_text("⚠️ اكتب رقماً صحيحاً أكبر من 0.")
+        return A_PRICE
+    adm(context)["price"] = int(t)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚚 مادي — مع شحن (ولايات + عنوان)", callback_data="nt_ship")],
+        [InlineKeyboardButton("💾 رقمي — بدون شحن", callback_data="nt_dig")],
+    ])
+    await update.message.reply_text("اختر <b>نوع المنتج</b>:", reply_markup=kb)
+    return A_TYPE
+
+
+async def got_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    ship = 1 if q.data == "nt_ship" else 0
+    adm(context)["shipping"] = ship
+    if ship:
+        await q.message.reply_text("📦 اكتب <b>الكمية المتوفرة</b> (رقم):")
+    else:
+        await q.message.reply_text("📦 اكتب عدد النسخ المتاحة، أو <b>0</b> لعدد غير محدود:")
+    return A_STOCK
+
+
+def parse_stock(text, shipping):
+    t = text.strip()
+    if not t.isdigit() or int(t) > 1000000:
+        return None
+    n = int(t)
+    if n == 0 and not shipping:
+        return -1
+    return n
+
+
+async def got_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    n = parse_stock(update.message.text, adm(context)["shipping"])
+    if n is None:
+        await update.message.reply_text("⚠️ اكتب رقماً صحيحاً.")
+        return A_STOCK
+    adm(context)["stock"] = n
+    await update.message.reply_text("📝 اكتب <b>وصف المنتج</b> (أو /skip للتخطي):")
+    return A_DESC
+
+
+async def create_draft(update, context, desc):
+    a = adm(context)
+    a["pid"] = add_product(a["name"], desc, a["price"], a["stock"], a["shipping"], active=0)
+    await update.message.reply_text(
+        f"📷 أرسل <b>صور المنتج</b> (حتى {MAX_PHOTOS}، كصور وليس كملفات).\n"
+        "عند الانتهاء اكتب /done — أو /skip إذا لا تريد صوراً."
+    )
+    return A_PHOTOS
+
+
+async def got_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await create_draft(update, context, update.message.text.strip()[:700])
+
+
+async def skip_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await create_draft(update, context, "")
+
+
+async def got_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    pid = a["pid"]
+    if a.pop("replace", False):
+        clear_photos(pid)
+    n = len(get_photos(pid))
+    if n >= MAX_PHOTOS:
+        await update.message.reply_text(f"⚠️ الحد الأقصى {MAX_PHOTOS} صور. اكتب /done للمتابعة.")
+        return A_PHOTOS
+    add_photo(pid, update.message.photo[-1].file_id)
+    await update.message.reply_text(f"✅ تمت إضافة الصورة ({n + 1}/{MAX_PHOTOS}). أرسل غيرها أو اكتب /done.")
+    return A_PHOTOS
+
+
+async def photos_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ أرسل صورة (كصورة وليس كملف)، أو /done للمتابعة.")
+    return A_PHOTOS
+
+
+async def finish_admin(update, context):
+    a = adm(context)
+    pid = a.get("pid")
+    if a.get("mode") == "new" and pid:
+        update_product(pid, active=1)
+        await update.effective_message.reply_text("✅ تم حفظ المنتج ونشره.")
+    context.user_data.pop("adm", None)
+    if pid:
+        await render_panel(update.effective_message, pid)
     return ConversationHandler.END
 
 
-async def setphoto_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ أرسل صورة فقط (كصورة وليس كملف)، أو /cancel للإلغاء.")
-    return WAIT_PHOTO
+async def ask_delivery(message):
+    await message.reply_text(
+        "🎁 أرسل <b>ما سيستلمه الزبون بعد الدفع</b>:\n"
+        "• نص (رابط / كود / تعليمات) — آخر نص يستبدل السابق\n"
+        "• و/أو ملف (أرسله كـ Document)\n\n"
+        "عند الانتهاء اكتب /done."
+    )
 
 
-async def setphoto_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def photos_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    p = get_product(a["pid"])
+    if a.get("mode") == "new" and p and not p["shipping"]:
+        await ask_delivery(update.message)
+        return A_DELIV
+    return await finish_admin(update, context)
+
+
+async def got_deliv_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    update_product(adm(context)["pid"], delivery_text=update.message.text.strip()[:3000])
+    await update.message.reply_text("✅ تم حفظ النص. أرسل ملفاً أيضاً أو اكتب /done.")
+    return A_DELIV
+
+
+async def got_deliv_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    update_product(adm(context)["pid"], delivery_file=update.message.document.file_id)
+    await update.message.reply_text("✅ تم حفظ الملف. أرسل نصاً أيضاً أو اكتب /done.")
+    return A_DELIV
+
+
+async def deliv_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await finish_admin(update, context)
+
+
+# ── تعديل منتج (دخول من الأزرار) ──
+EDIT_PROMPTS = {
+    "name": "✏️ اكتب الاسم الجديد:",
+    "desc": "📝 اكتب الوصف الجديد (أو - لمسحه):",
+    "price": "💰 اكتب السعر الجديد بالنجوم:",
+    "stock": "📦 اكتب المخزون الجديد (للمنتج الرقمي: 0 = غير محدود):",
+}
+
+
+async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return ConversationHandler.END
+    _, field, pid = q.data.split("_")
+    pid = int(pid)
+    if not get_product(pid):
+        await q.message.reply_text("المنتج غير موجود.")
+        return ConversationHandler.END
+    context.user_data["adm"] = {"mode": "edit", "pid": pid, "field": field}
+
+    if field == "photos":
+        context.user_data["adm"]["replace"] = True
+        await q.message.reply_text(
+            f"📷 أرسل الصور الجديدة (حتى {MAX_PHOTOS}) — ستستبدل القديمة.\nعند الانتهاء: /done  |  للإبقاء على القديمة: /skip"
+        )
+        return A_PHOTOS
+    if field == "deliv":
+        await ask_delivery(q.message)
+        return A_DELIV
+    await q.message.reply_text(EDIT_PROMPTS[field] + "\n(للإلغاء: /cancel)")
+    return E_VALUE
+
+
+async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    pid, field = a["pid"], a["field"]
+    p = get_product(pid)
+    if not p:
+        await update.message.reply_text("المنتج غير موجود.")
+        return ConversationHandler.END
+    t = update.message.text.strip()
+
+    if field == "name":
+        if not (2 <= len(t) <= 100):
+            await update.message.reply_text("⚠️ اكتب اسماً من 2 إلى 100 حرف.")
+            return E_VALUE
+        update_product(pid, name=t)
+    elif field == "desc":
+        update_product(pid, description="" if t == "-" else t[:700])
+    elif field == "price":
+        if not t.isdigit() or not (1 <= int(t) <= 1000000):
+            await update.message.reply_text("⚠️ اكتب رقماً صحيحاً أكبر من 0.")
+            return E_VALUE
+        update_product(pid, price=int(t))
+    elif field == "stock":
+        n = parse_stock(t, p["shipping"])
+        if n is None:
+            await update.message.reply_text("⚠️ اكتب رقماً صحيحاً.")
+            return E_VALUE
+        update_product(pid, stock=n)
+
+    context.user_data.pop("adm", None)
+    await update.message.reply_text("✅ تم التحديث.")
+    await render_panel(update.message, pid)
+    return ConversationHandler.END
+
+
+async def adm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = context.user_data.pop("adm", {})
+    if a.get("mode") == "new" and a.get("pid"):
+        delete_product(a["pid"])  # مسودة غير مكتملة
     await update.message.reply_text("تم الإلغاء.")
     return ConversationHandler.END
 
 
-async def cmd_delphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    set_setting("photo", None)
-    await update.message.reply_text("🗑 تم حذف صورة المنتج.")
-
-
-async def cmd_setdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    text = update.message.text.partition(" ")[2].strip()
-    if not text:
-        await update.message.reply_text("الاستعمال: <code>/setdesc وصف الآلة هنا</code>")
-        return
-    set_setting("desc", text[:700])
-    await update.message.reply_text("✅ تم تحديث وصف المنتج.")
-
-
+# ───────────────────────── أوامر الأدمن: الطلبات ─────────────────────────
 async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
@@ -621,10 +1148,11 @@ async def cmd_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     set_order(o["id"], "shipped")
     await update.message.reply_text(f"✅ الطلب #{o['id']} أصبح «تم الشحن».")
-    try:
-        await context.bot.send_message(o["user_id"], f"🚚 طلبك #{o['id']} في الطريق إليك! سيتصل بك المُوصِّل قريباً.")
-    except Exception:
-        pass
+    if o.get("wilaya"):
+        try:
+            await context.bot.send_message(o["user_id"], f"🚚 طلبك #{o['id']} في الطريق إليك! سيتصل بك المُوصِّل قريباً.")
+        except Exception:
+            pass
 
 
 async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -642,8 +1170,8 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"فشل الاسترجاع: {esc(e)}")
         return
-    if o["status"] == "paid":
-        release_stock_one()
+    if o["status"] == "paid" and o.get("product_id"):
+        restock_one(o["product_id"])
     set_order(o["id"], "refunded")
     await update.message.reply_text(f"💸 تم استرجاع {o['amount']}⭐ للطلب #{o['id']}.")
     try:
@@ -652,29 +1180,16 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("الاستعمال: <code>/stock عدد</code>")
-        return
-    n = int(context.args[0])
-    add_stock(n)
-    await update.message.reply_text(f"تم ضبط المخزون على {n}.")
-
-
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     await update.message.reply_text(
         "🛠 <b>أوامر الأدمن</b>\n\n"
-        "/setphoto — تغيير صورة المنتج (ثم أرسل الصورة)\n"
-        "/delphoto — حذف الصورة\n"
-        "/setdesc نص — تغيير وصف المنتج\n"
+        "/addproduct — إضافة منتج جديد\n"
+        "/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، إخفاء، حذف)\n"
         "/orders — الطلبات المدفوعة\n"
         "/shipped رقم — تم الشحن\n"
-        "/refund رقم — استرجاع النجوم\n"
-        "/stock عدد — ضبط المخزون"
+        "/refund رقم — استرجاع النجوم"
     )
 
 
@@ -682,29 +1197,32 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled error", exc_info=context.error)
 
 
-async def setup_commands(app: Application):
-    """قائمة / : الزبائن يرون /start فقط، والأدمن يرى كل الأوامر."""
+ADMIN_COMMANDS = [
+    BotCommand("addproduct", "➕ إضافة منتج"),
+    BotCommand("products", "🗂 إدارة المنتجات"),
+    BotCommand("orders", "📦 الطلبات المدفوعة"),
+    BotCommand("shipped", "🚚 تم الشحن (رقم)"),
+    BotCommand("refund", "💸 استرجاع (رقم)"),
+    BotCommand("help", "🛠 أوامر الأدمن"),
+    BotCommand("start", "🏠 الصفحة الرئيسية"),
+]
+
+
+async def set_admin_commands(bot):
+    if not ADMIN_ID:
+        return
     try:
-        await app.bot.set_my_commands(
-            [BotCommand("start", "🏠 الصفحة الرئيسية")],
-            scope=BotCommandScopeDefault(),
-        )
-        if ADMIN_ID:
-            await app.bot.set_my_commands(
-                [
-                    BotCommand("setphoto", "📷 تغيير صورة المنتج"),
-                    BotCommand("delphoto", "🗑 حذف الصورة"),
-                    BotCommand("setdesc", "📝 تغيير الوصف"),
-                    BotCommand("orders", "📦 الطلبات المدفوعة"),
-                    BotCommand("shipped", "🚚 تم الشحن (رقم)"),
-                    BotCommand("refund", "💸 استرجاع (رقم)"),
-                    BotCommand("stock", "📊 ضبط المخزون (عدد)"),
-                    BotCommand("start", "🏠 الصفحة الرئيسية"),
-                ],
-                scope=BotCommandScopeChat(ADMIN_ID),
-            )
+        await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(ADMIN_ID))
     except Exception as e:
-        log.warning("set_my_commands failed: %s", e)
+        log.warning("admin set_my_commands failed: %s", e)
+
+
+async def setup_commands(app: Application):
+    try:
+        await app.bot.set_my_commands([BotCommand("start", "🏠 الصفحة الرئيسية")], scope=BotCommandScopeDefault())
+    except Exception as e:
+        log.warning("default set_my_commands failed: %s", e)
+    await set_admin_commands(app.bot)
 
 
 async def post_init(app: Application):
@@ -718,8 +1236,8 @@ async def post_init(app: Application):
         msg += f"🗄 قاعدة البيانات: SQLite ({os.path.abspath(DB_PATH)})"
         if not os.path.abspath(DB_PATH).startswith("/data"):
             msg += (
-                "\n\n⚠️ الملف مؤقت: عند إعادة النشر قد يرجع المخزون إلى 1 وتضيع الصورة. "
-                "بعد بيع القطعة اكتب <code>/stock 0</code>، أو اربط Volume على /data وضع DB_PATH=/data/shop.db"
+                "\n\n⚠️ الملف مؤقت: عند إعادة النشر قد تضيع المنتجات. "
+                "اربط Volume على /data وضع DB_PATH=/data/shop.db"
             )
     msg += "\n\nاكتب /help لعرض الأوامر."
     try:
@@ -739,26 +1257,51 @@ def main():
         .build()
     )
 
-    photo_conv = ConversationHandler(
-        entry_points=[CommandHandler("setphoto", cmd_setphoto)],
+    text_only = filters.TEXT & ~filters.COMMAND
+
+    admin_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("addproduct", cmd_addproduct),
+            CallbackQueryHandler(new_product_cb, pattern=r"^adm_new$"),
+            CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|stock|photos|deliv)_\d+$"),
+        ],
         states={
-            WAIT_PHOTO: [
-                MessageHandler(filters.PHOTO, got_setphoto),
-                MessageHandler(~filters.COMMAND, setphoto_wrong),
+            A_NAME: [MessageHandler(text_only, got_name)],
+            A_PRICE: [MessageHandler(text_only, got_price)],
+            A_TYPE: [CallbackQueryHandler(got_type, pattern=r"^nt_(ship|dig)$")],
+            A_STOCK: [MessageHandler(text_only, got_stock)],
+            A_DESC: [
+                CommandHandler("skip", skip_desc),
+                MessageHandler(text_only, got_desc),
             ],
+            A_PHOTOS: [
+                MessageHandler(filters.PHOTO, got_photo),
+                CommandHandler(["done", "skip"], photos_done),
+                MessageHandler(text_only, photos_wrong),
+            ],
+            A_DELIV: [
+                MessageHandler(filters.Document.ALL, got_deliv_file),
+                CommandHandler(["done", "skip"], deliv_done),
+                MessageHandler(text_only, got_deliv_text),
+            ],
+            E_VALUE: [MessageHandler(text_only, got_edit_value)],
         },
-        fallbacks=[CommandHandler("cancel", setphoto_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", adm_cancel),
+            CommandHandler("start", start),
+        ],
+        allow_reentry=True,
     )
 
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(buy_cb, pattern="^buy$")],
+        entry_points=[CallbackQueryHandler(buy_cb, pattern=r"^buy_\d+$")],
         states={
             PHONE: [
                 MessageHandler(filters.CONTACT, got_phone),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, phone_text),
+                MessageHandler(text_only, phone_text),
             ],
             WILAYA: [CallbackQueryHandler(got_wilaya, pattern=r"^w_\d+$")],
-            ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_address)],
+            ADDRESS: [MessageHandler(text_only, got_address)],
             CONFIRM: [
                 CallbackQueryHandler(pay_cb, pattern="^pay$"),
                 CallbackQueryHandler(restart_cb, pattern="^restart$"),
@@ -772,18 +1315,21 @@ def main():
         allow_reentry=True,
     )
 
-    app.add_handler(photo_conv)
+    app.add_handler(admin_conv)
     app.add_handler(conv)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
+    app.add_handler(CallbackQueryHandler(list_cb, pattern=r"^list$"))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
+
+    app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
+    app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|clrphotos|del|delyes)_\d+$"))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("delphoto", cmd_delphoto))
-    app.add_handler(CommandHandler("setdesc", cmd_setdesc))
+    app.add_handler(CommandHandler("products", cmd_products))
     app.add_handler(CommandHandler("orders", cmd_orders))
     app.add_handler(CommandHandler("shipped", cmd_shipped))
     app.add_handler(CommandHandler("refund", cmd_refund))
-    app.add_handler(CommandHandler("stock", cmd_stock))
     app.add_error_handler(on_error)
 
     log.info("Bot started (polling)")
