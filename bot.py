@@ -12,6 +12,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, LabeledPrice,
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -36,6 +37,7 @@ RESERVE_MINUTES = 10
 DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
 PHONE, WILAYA, ADDRESS, CONFIRM = range(4)
+WAIT_PHOTO = 10
 
 WILAYAS = [
     "أدرار", "الشلف", "الأغواط", "أم البواقي", "باتنة", "بجاية", "بسكرة", "بشار", "البليدة", "البويرة",
@@ -552,13 +554,30 @@ def is_admin(update):
     return bool(update.effective_user) and ADMIN_ID != 0 and update.effective_user.id == ADMIN_ID
 
 
-async def admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الأدمن يرسل أي صورة للبوت → تصبح صورة المنتج."""
+# ── /setphoto : اختر الأمر ثم أرسل الصورة ──
+async def cmd_setphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
-        return
-    file_id = update.message.photo[-1].file_id
-    set_setting("photo", file_id)
+        return ConversationHandler.END
+    await update.message.reply_text("📷 أرسل الآن صورة المنتج (كصورة وليس كملف).\nللإلغاء: /cancel")
+    return WAIT_PHOTO
+
+
+async def got_setphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return ConversationHandler.END
+    set_setting("photo", update.message.photo[-1].file_id)
     await update.message.reply_text("✅ تم حفظ صورة المنتج. اكتب /start لترى النتيجة.\n(لحذفها: /delphoto)")
+    return ConversationHandler.END
+
+
+async def setphoto_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ أرسل صورة فقط (كصورة وليس كملف)، أو /cancel للإلغاء.")
+    return WAIT_PHOTO
+
+
+async def setphoto_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("تم الإلغاء.")
+    return ConversationHandler.END
 
 
 async def cmd_delphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -591,7 +610,10 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update) or not context.args:
+    if not is_admin(update):
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("الاستعمال: <code>/shipped رقم_الطلب</code>")
         return
     o = get_order(int(context.args[0]))
     if not o or o["status"] != "paid":
@@ -606,7 +628,10 @@ async def cmd_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update) or not context.args:
+    if not is_admin(update):
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("الاستعمال: <code>/refund رقم_الطلب</code>")
         return
     o = get_order(int(context.args[0]))
     if not o or o["status"] not in ("paid", "shipped") or not o["charge_id"]:
@@ -628,10 +653,14 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update) or not context.args:
+    if not is_admin(update):
         return
-    add_stock(max(0, int(context.args[0])))
-    await update.message.reply_text(f"تم ضبط المخزون على {int(context.args[0])}.")
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("الاستعمال: <code>/stock عدد</code>")
+        return
+    n = int(context.args[0])
+    add_stock(n)
+    await update.message.reply_text(f"تم ضبط المخزون على {n}.")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -639,7 +668,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🛠 <b>أوامر الأدمن</b>\n\n"
-        "📷 أرسل أي صورة للبوت ← تصبح صورة المنتج\n"
+        "/setphoto — تغيير صورة المنتج (ثم أرسل الصورة)\n"
         "/delphoto — حذف الصورة\n"
         "/setdesc نص — تغيير وصف المنتج\n"
         "/orders — الطلبات المدفوعة\n"
@@ -653,7 +682,33 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled error", exc_info=context.error)
 
 
+async def setup_commands(app: Application):
+    """قائمة / : الزبائن يرون /start فقط، والأدمن يرى كل الأوامر."""
+    try:
+        await app.bot.set_my_commands(
+            [BotCommand("start", "🏠 الصفحة الرئيسية")],
+            scope=BotCommandScopeDefault(),
+        )
+        if ADMIN_ID:
+            await app.bot.set_my_commands(
+                [
+                    BotCommand("setphoto", "📷 تغيير صورة المنتج"),
+                    BotCommand("delphoto", "🗑 حذف الصورة"),
+                    BotCommand("setdesc", "📝 تغيير الوصف"),
+                    BotCommand("orders", "📦 الطلبات المدفوعة"),
+                    BotCommand("shipped", "🚚 تم الشحن (رقم)"),
+                    BotCommand("refund", "💸 استرجاع (رقم)"),
+                    BotCommand("stock", "📊 ضبط المخزون (عدد)"),
+                    BotCommand("start", "🏠 الصفحة الرئيسية"),
+                ],
+                scope=BotCommandScopeChat(ADMIN_ID),
+            )
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
+
+
 async def post_init(app: Application):
+    await setup_commands(app)
     if not ADMIN_ID:
         return
     msg = "✅ البوت يعمل.\n"
@@ -684,6 +739,17 @@ def main():
         .build()
     )
 
+    photo_conv = ConversationHandler(
+        entry_points=[CommandHandler("setphoto", cmd_setphoto)],
+        states={
+            WAIT_PHOTO: [
+                MessageHandler(filters.PHOTO, got_setphoto),
+                MessageHandler(~filters.COMMAND, setphoto_wrong),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", setphoto_cancel)],
+    )
+
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(buy_cb, pattern="^buy$")],
         states={
@@ -706,11 +772,11 @@ def main():
         allow_reentry=True,
     )
 
+    app.add_handler(photo_conv)
     app.add_handler(conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
-    app.add_handler(MessageHandler(filters.PHOTO, admin_photo))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("delphoto", cmd_delphoto))
     app.add_handler(CommandHandler("setdesc", cmd_setdesc))
