@@ -59,6 +59,7 @@ if DEFAULT_LANG not in LANGS:
 PHONE, WILAYA, ADDRESS, CONFIRM, EXTRA = range(5)
 # حالات الأدمن
 A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE, X_LABEL, X_TYPE = range(20, 30)
+W_ADDR, A_TON = 30, 31
 
 WILAYAS = [
     "أدرار", "الشلف", "الأغواط", "أم البواقي", "باتنة", "بجاية", "بسكرة", "بشار", "البليدة", "البويرة",
@@ -177,6 +178,14 @@ _S = [
      "Usage: <code>/setwallet WALLET_ADDRESS</code>\nCurrent wallet: <code>{w}</code>"),
     ("wallet_bad", "⚠️ عنوان محفظة غير صالح (يبدأ بـ UQ أو EQ).", "⚠️ Invalid wallet address (starts with UQ or EQ)."),
     ("wallet_ok", "✅ تم حفظ محفظة TON لهذا المتجر.", "✅ TON wallet saved for this shop."),
+    ("b_wallet", "💎 محفظة TON", "💎 TON wallet"),
+    ("wallet_ask",
+     "💎 أرسل الآن <b>عنوان محفظة TON</b> الخاصة بك (يبدأ بـ UQ أو EQ).\nمن Tonkeeper: اضغط Receive ثم انسخ العنوان.\nالحالية: <code>{w}</code>\n(للإلغاء: /cancel)",
+     "💎 Now send your <b>TON wallet address</b> (starts with UQ or EQ).\nIn Tonkeeper: tap Receive and copy the address.\nCurrent: <code>{w}</code>\n(to cancel: /cancel)"),
+    ("ask_ton", "💎 اكتب سعر المنتج بعملة TON (مثال: 1.5) أو /skip للتخطي:",
+     "💎 Type the product price in TON (e.g. 1.5) or /skip:"),
+    ("ton_no_pending", "لا يوجد طلب دفع TON معلّق لك. اضغط «اشتري الآن» من /start.",
+     "You have no pending TON order. Tap “Buy now” from /start."),
     ("help_ton", "\n/setwallet عنوان — محفظة TON لاستلام الدفع", "\n/setwallet address — TON wallet to receive payments"),
     ("cmd_setwallet", "💎 محفظة TON", "💎 TON wallet"),
     # إشعارات الأدمن
@@ -591,16 +600,17 @@ def set_shop_lang(sid, lang):
 
 # ── محفظة TON (لكل متجر محفظته) ──
 def get_wallet():
-    sid = shop_id()
-    try:
-        with cursor() as cur:
-            cur.execute("SELECT value FROM shop_settings WHERE key=?", (f"ton_wallet_{sid}",))
-            r = cur.fetchone()
-        if r and r["value"]:
-            return r["value"]
-    except Exception as e:
-        log.warning("get_wallet failed: %s", e)
-    return TON_WALLET if sid == 0 else ""
+    """محفظة المتجر الحالي، وإلا محفظة البوت الرئيسي (تُستعمل لكل البوتات الفرعية)."""
+    for sid in (shop_id(), 0):
+        try:
+            with cursor() as cur:
+                cur.execute("SELECT value FROM shop_settings WHERE key=?", (f"ton_wallet_{sid}",))
+                r = cur.fetchone()
+            if r and r["value"]:
+                return r["value"]
+        except Exception as e:
+            log.warning("get_wallet failed: %s", e)
+    return TON_WALLET
 
 
 def set_wallet(w):
@@ -1383,16 +1393,61 @@ async def ton_check_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_setwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
-        return
-    if not context.args:
-        await update.message.reply_text(T("wallet_usage", w=esc(get_wallet() or "—")))
-        return
-    w = context.args[0].strip()
+        return ConversationHandler.END
+    if context.args:
+        w = context.args[0].strip()
+        if not WALLET_RE.match(w):
+            await update.message.reply_text(T("wallet_bad"))
+            return ConversationHandler.END
+        set_wallet(w)
+        await update.message.reply_text(T("wallet_ok"))
+        return ConversationHandler.END
+    context.user_data["adm"] = {"mode": "wallet"}
+    await update.message.reply_text(T("wallet_ask", w=esc(get_wallet() or "—")))
+    return W_ADDR
+
+
+async def wallet_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return ConversationHandler.END
+    context.user_data["adm"] = {"mode": "wallet"}
+    await q.message.reply_text(T("wallet_ask", w=esc(get_wallet() or "—")))
+    return W_ADDR
+
+
+async def got_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    w = update.message.text.strip()
     if not WALLET_RE.match(w):
         await update.message.reply_text(T("wallet_bad"))
-        return
+        return W_ADDR
     set_wallet(w)
+    context.user_data.pop("adm", None)
     await update.message.reply_text(T("wallet_ok"))
+    return ConversationHandler.END
+
+
+PAID_RE = re.compile(r"(دفعت|حولت|حوّلت|تم الدفع|تم التحويل|paid|sent|transferred|done)", re.I)
+
+
+async def user_says_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الزبون كتب «دفعت» ← نتحقق من آخر طلب TON معلّق له."""
+    with cursor() as cur:
+        cur.execute(
+            "SELECT * FROM shop_orders WHERE shop_id=? AND user_id=? AND status='pending' "
+            "AND ton_nano IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (shop_id(), update.effective_user.id),
+        )
+        o = cur.fetchone()
+    if not o:
+        await update.message.reply_text(T("ton_no_pending"))
+        return
+    h = await find_ton_payment(get_wallet(), o["id"], o.get("ton_nano"), o.get("created_at"))
+    if not h:
+        await update.message.reply_text(T("ton_not_found"))
+        return
+    await settle_ton(context, o, h)
 
 
 # ───────────────────────── لوحة الأدمن: المنتجات ─────────────────────────
@@ -1466,6 +1521,7 @@ async def send_products_admin(message):
         f"{'✅' if p['active'] else '🚫'} {'🛠' if p['shipping'] else '💾'} {p['name'][:30]} — {p['price']}⭐",
         callback_data=f"adm_panel_{p['id']}")] for p in prods]
     rows.append([InlineKeyboardButton(T("b_add"), callback_data="adm_new")])
+    rows.append([InlineKeyboardButton(T("b_wallet"), callback_data="adm_wallet")])
     await message.reply_text(T("products_title"), reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -1597,6 +1653,28 @@ async def got_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T("bad_int"))
         return A_STOCK
     adm(context)["stock"] = n
+    if get_wallet():
+        await update.message.reply_text(T("ask_ton"))
+        return A_TON
+    await update.message.reply_text(T("ask_desc"))
+    return A_DESC
+
+
+async def got_ton(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = update.message.text.strip().translate(AR_DIGITS).replace(",", ".").replace(" ", "")
+    try:
+        v = float(t)
+    except ValueError:
+        v = 0
+    if not (0 < v <= 1000000):
+        await update.message.reply_text(T("bad_ton"))
+        return A_TON
+    adm(context)["price_ton"] = v
+    await update.message.reply_text(T("ask_desc"))
+    return A_DESC
+
+
+async def skip_ton(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(T("ask_desc"))
     return A_DESC
 
@@ -1604,6 +1682,8 @@ async def got_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_draft(update, context, desc):
     a = adm(context)
     a["pid"] = add_product(a["name"], desc, a["price"], a["stock"], a["shipping"], active=0)
+    if a.get("price_ton"):
+        update_product(a["pid"], price_ton=a["price_ton"])
     await update.message.reply_text(T("ask_media", n=MAX_PHOTOS))
     return A_PHOTOS
 
@@ -2084,6 +2164,8 @@ def register_handlers(app: Application, is_main: bool):
     admin_conv = ConversationHandler(
         entry_points=[
             CommandHandler("addproduct", cmd_addproduct),
+            CommandHandler("setwallet", cmd_setwallet),
+            CallbackQueryHandler(wallet_entry, pattern=r"^adm_wallet$"),
             CallbackQueryHandler(new_product_cb, pattern=r"^adm_new$"),
             CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|ton|stock|photos|deliv|extra)_\d+$"),
         ],
@@ -2092,6 +2174,11 @@ def register_handlers(app: Application, is_main: bool):
             A_PRICE: [MessageHandler(text_only, got_price)],
             A_TYPE: [CallbackQueryHandler(got_type, pattern=r"^nt_(ship|dig)$")],
             A_STOCK: [MessageHandler(text_only, got_stock)],
+            A_TON: [
+                CommandHandler("skip", skip_ton),
+                MessageHandler(text_only, got_ton),
+            ],
+            W_ADDR: [MessageHandler(text_only, got_wallet)],
             A_DESC: [
                 CommandHandler("skip", skip_desc),
                 MessageHandler(text_only, got_desc),
@@ -2150,6 +2237,7 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
     app.add_handler(CallbackQueryHandler(ton_check_cb, pattern=r"^tonchk_\d+$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(PAID_RE), user_says_paid))
 
     app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
     app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|clrphotos|del|delyes)_\d+$"))
@@ -2158,7 +2246,6 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(CommandHandler("orders", cmd_orders))
     app.add_handler(CommandHandler("shipped", cmd_shipped))
     app.add_handler(CommandHandler("refund", cmd_refund))
-    app.add_handler(CommandHandler("setwallet", cmd_setwallet))
 
     if is_main:
         app.add_handler(CommandHandler("bots", cmd_bots))
