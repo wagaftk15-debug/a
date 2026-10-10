@@ -106,7 +106,10 @@ _S = [
     ("unlimited", "غير محدود", "Unlimited"),
     # خطوات الطلب
     ("btn_cancel", "❌ إلغاء", "❌ Cancel"),
-    ("btn_pay", "💳 تأكيد والدفع {price}⭐", "💳 Confirm & pay {price}⭐"),
+    ("btn_pay", "⭐ الدفع بالنجوم ({price})", "⭐ Pay with Stars ({price})"),
+    ("btn_pay_ton", "💎 الدفع بـ TON ({ton})", "💎 Pay with TON ({ton})"),
+    ("reserved_ton", "⏳ تم حجز طلبك لمدة {m} دقائق. أكمل الدفع بعملة TON من الرسالة أدناه 👇",
+     "⏳ Your order is reserved for {m} minutes. Complete the TON payment using the message below 👇"),
     ("btn_edit_addr", "✏️ تعديل الولاية/العنوان", "✏️ Edit wilaya/address"),
     ("summary_title", "📋 <b>راجع طلبك:</b>\n\n🛍 {name}\n", "📋 <b>Review your order:</b>\n\n🛍 {name}\n"),
     ("summary_amount", "\n💰 المبلغ: <b>{price}⭐</b>", "\n💰 Amount: <b>{price}⭐</b>"),
@@ -1009,6 +1012,9 @@ async def send_summary(message, context):
     d = context.user_data
     p = get_product(d["pid"])
     rows = [[InlineKeyboardButton(T("btn_pay", price=p["price"]), callback_data="pay")]]
+    if p.get("price_ton") and get_wallet():
+        rows.append([InlineKeyboardButton(T("btn_pay_ton", ton=f"{fmt_ton(p['price_ton'])} TON"),
+                                          callback_data="payton")])
     if p["shipping"]:
         rows.append([InlineKeyboardButton(T("btn_edit_addr"), callback_data="restart")])
     rows.append([InlineKeyboardButton(T("btn_cancel"), callback_data="cancel")])
@@ -1131,7 +1137,7 @@ async def restart_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WILAYA
 
 
-async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _pay(update: Update, context: ContextTypes.DEFAULT_TYPE, method):
     q = update.callback_query
     await q.answer()
     d = context.user_data
@@ -1153,26 +1159,16 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     order = get_order(oid)
 
-    await q.message.reply_text(T("reserved", m=RESERVE_MINUTES))
-    desc = (p["description"] or p["name"])
-    if p["shipping"]:
-        desc = T("invoice_ship_desc", name=p["name"])
-    await context.bot.send_invoice(
-        chat_id=q.message.chat_id,
-        title=p["name"][:32],
-        description=desc[:255],
-        payload=f"order_{oid}",
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(p["name"][:32], order["amount"])],
-    )
-
-    # ── خيار الدفع بعملة TON (إن حدّد الأدمن سعراً بالتون ومحفظة) ──
-    wallet = get_wallet()
-    if wallet and p.get("price_ton"):
+    if method == "ton":
+        wallet = get_wallet()
+        if not (wallet and p.get("price_ton")):
+            set_order(oid, "cancelled")
+            await q.message.reply_text(T("session_expired"))
+            return ConversationHandler.END
         nano = to_nano(p["price_ton"])
         with cursor() as cur:
             cur.execute("UPDATE shop_orders SET ton_nano=? WHERE id=?", (nano, oid))
+        await q.message.reply_text(T("reserved_ton", m=RESERVE_MINUTES))
         memo = ton_memo(oid)
         url = f"https://app.tonkeeper.com/transfer/{wallet}?amount={nano}&text={memo}"
         kb = InlineKeyboardMarkup([
@@ -1187,7 +1183,30 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task = asyncio.create_task(watch_ton(context, oid))
         TON_TASKS.add(task)
         task.add_done_callback(TON_TASKS.discard)
+        return ConversationHandler.END
+
+    await q.message.reply_text(T("reserved", m=RESERVE_MINUTES))
+    desc = (p["description"] or p["name"])
+    if p["shipping"]:
+        desc = T("invoice_ship_desc", name=p["name"])
+    await context.bot.send_invoice(
+        chat_id=q.message.chat_id,
+        title=p["name"][:32],
+        description=desc[:255],
+        payload=f"order_{oid}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(p["name"][:32], order["amount"])],
+    )
     return ConversationHandler.END
+
+
+async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _pay(update, context, "stars")
+
+
+async def payton_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _pay(update, context, "ton")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2216,6 +2235,7 @@ def register_handlers(app: Application, is_main: bool):
             EXTRA: [MessageHandler(text_only, got_extra)],
             CONFIRM: [
                 CallbackQueryHandler(pay_cb, pattern="^pay$"),
+                CallbackQueryHandler(payton_cb, pattern="^payton$"),
                 CallbackQueryHandler(restart_cb, pattern="^restart$"),
             ],
         },
