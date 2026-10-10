@@ -57,7 +57,7 @@ if DEFAULT_LANG not in LANGS:
 PHONE, WILAYA, ADDRESS, CONFIRM, EXTRA = range(5)
 # حالات محادثة الأدمن
 A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE, X_LABEL, X_TYPE = range(20, 30)
-W_ADDR, A_TON = 30, 31
+W_ADDR, A_TON, A_METHOD = 30, 31, 32
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
@@ -100,7 +100,7 @@ _S = [
      "🛍 <b>Our products</b>\n\nPick a product to see its details 👇"),
     ("product_gone", "هذا المنتج لم يعد متوفراً.", "This product is no longer available."),
     ("price_line", "💰 السعر: <b>{price} ⭐</b> (نجوم تيليجرام)\n", "💰 Price: <b>{price} ⭐</b> (Telegram Stars)\n"),
-    ("price_ton_line", "💎 أو: <b>{ton} TON</b>\n", "💎 Or: <b>{ton} TON</b>\n"),
+    ("price_ton_line", "💎 السعر: <b>{ton} TON</b>\n", "💎 Price: <b>{ton} TON</b>\n"),
     ("stock_line", "📦 المتوفر: <b>{n}</b>\n", "📦 In stock: <b>{n}</b>\n"),
     ("dz_only", "🇩🇿 البيع والتوصيل داخل الجزائر فقط\n", "🇩🇿 Sales and delivery inside Algeria only\n"),
     ("digital_note", "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n", "💾 Digital product — delivered right after payment\n"),
@@ -127,8 +127,7 @@ _S = [
      "⏳ Your order is reserved for {m} minutes. Complete the TON payment using the message below 👇"),
     ("btn_edit_addr", "✏️ تعديل الولاية/العنوان", "✏️ Edit wilaya/address"),
     ("summary_title", "📋 <b>راجع طلبك:</b>\n\n🛍 {name}\n", "📋 <b>Review your order:</b>\n\n🛍 {name}\n"),
-    ("summary_amount", "\n💰 المبلغ: <b>{price}⭐</b>", "\n💰 Amount: <b>{price}⭐</b>"),
-    ("summary_amount_ton", " / <b>{ton} TON</b>", " / <b>{ton} TON</b>"),
+    ("summary_amount", "\n💰 المبلغ: <b>{amount}</b>", "\n💰 Amount: <b>{amount}</b>"),
     ("phone_ask",
      "🇩🇿 للتأكد أنك من الجزائر، شارك رقم هاتفك بالضغط على الزر أدناه.\n(يجب أن يكون الرقم جزائري +213 ومرتبط بحسابك)",
      "🇩🇿 To confirm you are in Algeria, share your phone number using the button below.\n(It must be an Algerian +213 number linked to your account)"),
@@ -202,8 +201,22 @@ _S = [
     ("wallet_ask",
      "💎 أرسل الآن <b>عنوان محفظة TON</b> الخاصة بك (يبدأ بـ UQ أو EQ).\nمن Tonkeeper: اضغط Receive ثم انسخ العنوان.\nالحالية: <code>{w}</code>\n(للإلغاء: /cancel)",
      "💎 Now send your <b>TON wallet address</b> (starts with UQ or EQ).\nIn Tonkeeper: tap Receive and copy the address.\nCurrent: <code>{w}</code>\n(to cancel: /cancel)"),
-    ("ask_ton", "💎 اكتب سعر المنتج بعملة TON (مثال: 1.5) أو /skip للتخطي:",
-     "💎 Type the product price in TON (e.g. 1.5) or /skip:"),
+    ("ask_ton", "💎 اكتب سعر المنتج بعملة TON (مثال: 1.5):",
+     "💎 Type the product price in TON (e.g. 1.5):"),
+    # طرق الدفع
+    ("pick_method", "💳 اختر <b>طريقة الدفع</b> لهذا المنتج:", "💳 Choose the <b>payment method</b> for this product:"),
+    ("b_pm_stars", "⭐ نجوم تيليجرام فقط", "⭐ Telegram Stars only"),
+    ("b_pm_ton", "💎 TON فقط", "💎 TON only"),
+    ("b_pm_both", "⭐ + 💎 الاثنان معاً", "⭐ + 💎 Both"),
+    ("wallet_needed", "⚠️ لاستعمال TON أضف محفظتك أولاً بالأمر /setwallet.",
+     "⚠️ To use TON, add your wallet first with /setwallet."),
+    ("need_one", "⚠️ يجب أن تبقى طريقة دفع واحدة على الأقل.", "⚠️ At least one payment method must remain."),
+    ("no_pay_method", "⚠️ لا توجد طريقة دفع متاحة لهذا المنتج حالياً.",
+     "⚠️ No payment method is available for this product right now."),
+    ("pt_stars_off", "⭐ الدفع بالنجوم: 🚫 معطّل", "⭐ Stars payment: 🚫 Disabled"),
+    ("pt_ton_off", "💎 الدفع بـ TON: 🚫 معطّل", "💎 TON payment: 🚫 Disabled"),
+    ("b_off_stars", "🗑 حذف دفع النجوم", "🗑 Remove Stars"),
+    ("b_off_ton", "🗑 حذف دفع TON", "🗑 Remove TON"),
     ("ton_no_pending", "لا يوجد طلب دفع TON معلّق لك. اضغط «اشتري الآن» من /start.",
      "You have no pending TON order. Tap “Buy now” from /start."),
     # كلمات يكتبها الزبون ليقول إنه دفع (مفصولة بـ | ، تُجمع من كل اللغات)
@@ -237,7 +250,7 @@ _S = [
     ("pt_deliv", "🎁 محتوى التسليم: نص {a} | ملف {b}", "🎁 Delivery content: text {a} | file {b}"),
     ("b_name", "✏️ الاسم", "✏️ Name"),
     ("b_desc", "📝 الوصف", "📝 Description"),
-    ("b_price", "💰 السعر", "💰 Price"),
+    ("b_price", "⭐ سعر النجوم", "⭐ Stars price"),
     ("b_stock", "📊 المخزون", "📊 Stock"),
     ("b_photos", "📷 تغيير الصور/الفيديو", "📷 Change photos/videos"),
     ("b_clr", "🧹 مسح الوسائط", "🧹 Clear media"),
@@ -559,6 +572,8 @@ def init_db():
     # الدفع بعملة TON
     ensure_column("shop_products", "price_ton", "DOUBLE PRECISION")
     ensure_column("shop_orders", "ton_nano", "BIGINT")
+    # تفعيل الدفع بالنجوم لكل منتج (1 = مفعّل، 0 = معطّل)
+    ensure_column("shop_products", "stars_on", "INT DEFAULT 1")
 
     if USE_PG:
         with cursor() as cur:
@@ -635,7 +650,7 @@ def set_wallet(w):
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
 PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active",
-                  "extra_label", "extra_type", "price_ton"}
+                  "extra_label", "extra_type", "price_ton", "stars_on"}
 
 
 def add_product(name, desc, price, stock, shipping, active=1):
@@ -860,6 +875,34 @@ def parse_ton_price(text):
     return v if 0 < v <= 1000000 else None
 
 
+def stars_on(p):
+    return p.get("stars_on") != 0
+
+
+def ton_on(p):
+    return bool(p.get("price_ton")) and bool(get_wallet())
+
+
+def pay_methods(p):
+    """طرق الدفع المتاحة فعلياً لهذا المنتج: 'stars' و/أو 'ton'."""
+    m = []
+    if stars_on(p) and (p.get("price") or 0) > 0:
+        m.append("stars")
+    if ton_on(p):
+        m.append("ton")
+    return m
+
+
+def price_label(p):
+    parts = []
+    m = pay_methods(p)
+    if "stars" in m:
+        parts.append(f"{p['price']}⭐")
+    if "ton" in m:
+        parts.append(f"{fmt_ton(p['price_ton'])} TON")
+    return " / ".join(parts) or "—"
+
+
 def order_text(o, lang=None):
     name = o.get("product_name") or T("unknown_product", lang)
     uname = f"@{esc(o['username'])}" if o.get("username") else "—"
@@ -913,7 +956,7 @@ async def show_list(message, prods):
     rows = []
     for p in prods:
         mark = "❌ " if p["stock"] == 0 else ("🛠 " if p["shipping"] else "💾 ")
-        rows.append([InlineKeyboardButton(f"{mark}{p['name'][:40]} — {p['price']}⭐", callback_data=f"prod_{p['id']}")])
+        rows.append([InlineKeyboardButton(f"{mark}{p['name'][:40]} — {price_label(p)}", callback_data=f"prod_{p['id']}")])
     await message.reply_text(T("list_title"), reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -922,8 +965,10 @@ async def show_product(message, p, uid):
     text = f"{'🛠' if p['shipping'] else '💾'} <b>{esc(p['name'])}</b>\n\n"
     if p["description"]:
         text += f"{esc(p['description'])}\n\n"
-    text += T("price_line", price=p["price"])
-    if p.get("price_ton") and get_wallet():
+    methods = pay_methods(p)
+    if "stars" in methods:
+        text += T("price_line", price=p["price"])
+    if "ton" in methods:
         text += T("price_ton_line", ton=fmt_ton(p["price_ton"]))
     if p["shipping"]:
         if p["stock"] >= 0:
@@ -934,7 +979,9 @@ async def show_product(message, p, uid):
     text += "\n"
 
     rows = []
-    if state == "available":
+    if state == "available" and not methods:
+        text += T("no_pay_method")
+    elif state == "available":
         text += T("buy_prompt")
         rows.append([InlineKeyboardButton(T("btn_buy"), callback_data=f"buy_{p['id']}")])
     else:
@@ -1032,8 +1079,11 @@ async def lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_summary(message, context):
     d = context.user_data
     p = get_product(d["pid"])
-    rows = [[InlineKeyboardButton(T("btn_pay", price=p["price"]), callback_data="pay")]]
-    if p.get("price_ton") and get_wallet():
+    methods = pay_methods(p)
+    rows = []
+    if "stars" in methods:
+        rows.append([InlineKeyboardButton(T("btn_pay", price=p["price"]), callback_data="pay")])
+    if "ton" in methods:
         rows.append([InlineKeyboardButton(T("btn_pay_ton", ton=f"{fmt_ton(p['price_ton'])} TON"),
                                           callback_data="payton")])
     if p["shipping"]:
@@ -1046,9 +1096,7 @@ async def send_summary(message, context):
         text += T("digital_note")
     if p.get("extra_label") and d.get("extra"):
         text += f"🧩 {esc(p['extra_label'])}: <b>{esc(d['extra'])}</b>\n"
-    text += T("summary_amount", price=p["price"])
-    if p.get("price_ton") and get_wallet():
-        text += T("summary_amount_ton", ton=fmt_ton(p["price_ton"]))
+    text += T("summary_amount", amount=price_label(p))
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -1091,6 +1139,9 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(T("unavail_" + state))
         return ConversationHandler.END
     p = get_product(pid)
+    if not pay_methods(p):
+        await q.message.reply_text(T("no_pay_method"))
+        return ConversationHandler.END
     context.user_data.clear()
     context.user_data["pid"] = pid
 
@@ -1193,6 +1244,9 @@ async def _pay(update: Update, context: ContextTypes.DEFAULT_TYPE, method):
     pid = d.get("pid")
     p = get_product(pid) if pid else None
     if not p:
+        await q.message.reply_text(T("session_expired"))
+        return ConversationHandler.END
+    if method not in pay_methods(p):
         await q.message.reply_text(T("session_expired"))
         return ConversationHandler.END
     if p["shipping"] and not all(k in d for k in ("phone", "wilaya", "address")):
@@ -1497,10 +1551,9 @@ def panel_text(p):
     t = (
         f"🗂 <b>{esc(p['name'])}</b>  (#{p['id']})\n\n"
         f"{T('pt_type_ship') if p['shipping'] else T('pt_type_dig')}\n"
-        f"{T('pt_price', p=p['price'])}\n"
+        f"{T('pt_price', p=p['price']) if stars_on(p) else T('pt_stars_off')}\n"
     )
-    if p.get("price_ton"):
-        t += T("pt_ton", p=f"{fmt_ton(p['price_ton'])} TON") + "\n"
+    t += (T("pt_ton", p=f"{fmt_ton(p['price_ton'])} TON") if p.get("price_ton") else T("pt_ton_off")) + "\n"
     t += (
         f"{T('pt_stock', s=stock_label(p['stock']))}\n"
         f"{T('pt_media', n=n)}\n"
@@ -1529,6 +1582,9 @@ def panel_markup(p):
          B(T("b_clr"), callback_data=f"adm_clrphotos_{i}")],
         [B(T("b_to_dig") if p["shipping"] else T("b_to_phys"), callback_data=f"adm_ship_{i}")],
     ]
+    if p.get("price_ton") and stars_on(p):   # الاثنان مفعّلان ← يمكن حذف أحدهما
+        rows.append([B(T("b_off_stars"), callback_data=f"adm_offstars_{i}"),
+                     B(T("b_off_ton"), callback_data=f"adm_offton_{i}")])
     if not p["shipping"]:
         rows.append([B(T("b_deliv"), callback_data=f"edt_deliv_{i}")])
     rows.append([B(T("b_extra"), callback_data=f"edt_extra_{i}")])
@@ -1555,7 +1611,7 @@ async def render_panel(message, pid, edit=False):
 async def send_products_admin(message):
     prods = list_products(only_active=False)
     rows = [[InlineKeyboardButton(
-        f"{'✅' if p['active'] else '🚫'} {'🛠' if p['shipping'] else '💾'} {p['name'][:30]} — {p['price']}⭐",
+        f"{'✅' if p['active'] else '🚫'} {'🛠' if p['shipping'] else '💾'} {p['name'][:30]} — {price_label(p)}",
         callback_data=f"adm_panel_{p['id']}")] for p in prods]
     rows.append([InlineKeyboardButton(T("b_add"), callback_data="adm_new")])
     rows.append([InlineKeyboardButton(T("b_wallet"), callback_data="adm_wallet")])
@@ -1595,6 +1651,18 @@ async def adm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "active":
         update_product(pid, active=0 if p["active"] else 1)
         await render_panel(q.message, pid, edit=True)
+    elif action == "offstars":
+        if p.get("price_ton"):
+            update_product(pid, stars_on=0)
+            await render_panel(q.message, pid, edit=True)
+        else:
+            await q.message.reply_text(T("need_one"))
+    elif action == "offton":
+        if stars_on(p):
+            update_product(pid, price_ton=None)
+            await render_panel(q.message, pid, edit=True)
+        else:
+            await q.message.reply_text(T("need_one"))
     elif action == "clrphotos":
         clear_photos(pid)
         await render_panel(q.message, pid, edit=True)
@@ -1643,8 +1711,40 @@ async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T("bad_name"))
         return A_NAME
     adm(context)["name"] = name
-    await update.message.reply_text(T("ask_price"))
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(T("b_pm_stars"), callback_data="pm_stars")],
+        [InlineKeyboardButton(T("b_pm_ton"), callback_data="pm_ton")],
+        [InlineKeyboardButton(T("b_pm_both"), callback_data="pm_both")],
+    ])
+    await update.message.reply_text(T("pick_method"), reply_markup=kb)
+    return A_METHOD
+
+
+async def got_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not is_admin(update):
+        await q.answer()
+        return ConversationHandler.END
+    m = q.data.split("_")[1]
+    if m in ("ton", "both") and not get_wallet():
+        await q.answer(T("wallet_needed"), show_alert=True)
+        return A_METHOD
+    await q.answer()
+    adm(context)["method"] = m
+    if m == "ton":
+        await q.message.reply_text(T("ask_ton"))
+        return A_TON
+    await q.message.reply_text(T("ask_price"))
     return A_PRICE
+
+
+async def ask_type(message):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(T("b_t_ship"), callback_data="nt_ship")],
+        [InlineKeyboardButton(T("b_t_dig"), callback_data="nt_dig")],
+    ])
+    await message.reply_text(T("pick_type"), reply_markup=kb)
+    return A_TYPE
 
 
 async def got_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1653,12 +1753,10 @@ async def got_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T("bad_price"))
         return A_PRICE
     adm(context)["price"] = int(t)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(T("b_t_ship"), callback_data="nt_ship")],
-        [InlineKeyboardButton(T("b_t_dig"), callback_data="nt_dig")],
-    ])
-    await update.message.reply_text(T("pick_type"), reply_markup=kb)
-    return A_TYPE
+    if adm(context).get("method") == "both":
+        await update.message.reply_text(T("ask_ton"))
+        return A_TON
+    return await ask_type(update.message)
 
 
 async def got_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1686,9 +1784,6 @@ async def got_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T("bad_int"))
         return A_STOCK
     adm(context)["stock"] = n
-    if get_wallet():
-        await update.message.reply_text(T("ask_ton"))
-        return A_TON
     await update.message.reply_text(T("ask_desc"))
     return A_DESC
 
@@ -1699,20 +1794,13 @@ async def got_ton(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T("bad_ton"))
         return A_TON
     adm(context)["price_ton"] = v
-    await update.message.reply_text(T("ask_desc"))
-    return A_DESC
-
-
-async def skip_ton(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(T("ask_desc"))
-    return A_DESC
+    return await ask_type(update.message)
 
 
 async def create_draft(update, context, desc):
     a = adm(context)
-    a["pid"] = add_product(a["name"], desc, a["price"], a["stock"], a["shipping"], active=0)
-    if a.get("price_ton"):
-        update_product(a["pid"], price_ton=a["price_ton"])
+    a["pid"] = add_product(a["name"], desc, a.get("price", 0), a["stock"], a["shipping"], active=0)
+    update_product(a["pid"], price_ton=a.get("price_ton"), stars_on=0 if a.get("method") == "ton" else 1)
     await update.message.reply_text(T("ask_media", n=MAX_PHOTOS))
     return A_PHOTOS
 
@@ -1833,11 +1921,18 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t.isdigit() or not (1 <= int(t) <= 1000000):
             await update.message.reply_text(T("bad_price"))
             return E_VALUE
-        update_product(pid, price=int(t))
+        update_product(pid, price=int(t), stars_on=1)
     elif field == "ton":
         if t == "-":
+            if not stars_on(p):          # لا يمكن حذف الطريقة الوحيدة
+                await update.message.reply_text(T("need_one"))
+                return E_VALUE
             update_product(pid, price_ton=None)
         else:
+            if not get_wallet():
+                context.user_data.pop("adm", None)
+                await update.message.reply_text(T("wallet_needed"))
+                return ConversationHandler.END
             v = parse_ton_price(t)
             if v is None:
                 await update.message.reply_text(T("bad_ton"))
@@ -2199,10 +2294,8 @@ def register_handlers(app: Application, is_main: bool):
             A_PRICE: [MessageHandler(text_only, got_price)],
             A_TYPE: [CallbackQueryHandler(got_type, pattern=r"^nt_(ship|dig)$")],
             A_STOCK: [MessageHandler(text_only, got_stock)],
-            A_TON: [
-                CommandHandler("skip", skip_ton),
-                MessageHandler(text_only, got_ton),
-            ],
+            A_METHOD: [CallbackQueryHandler(got_method, pattern=r"^pm_(stars|ton|both)$")],
+            A_TON: [MessageHandler(text_only, got_ton)],
             W_ADDR: [MessageHandler(text_only, got_wallet)],
             A_DESC: [
                 CommandHandler("skip", skip_desc),
@@ -2271,7 +2364,7 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^setlang_(ar|en)$"))
     app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
-    app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|clrphotos|del|delyes)_\d+$"))
+    app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|offstars|offton|clrphotos|del|delyes)_\d+$"))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("products", cmd_products))
     app.add_handler(CommandHandler("orders", cmd_orders))
