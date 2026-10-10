@@ -43,7 +43,6 @@ TON_WALLET = os.environ.get("TON_WALLET", "")          # محفظة البوت �
 TONCENTER_KEY = os.environ.get("TONCENTER_KEY", "")    # مفتاح مجاني من @tonapibot (اختياري لكن يُنصح به)
 WALLET_RE = re.compile(r"^(EQ|UQ)[A-Za-z0-9_-]{46}$")
 TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
-PAID_RE = re.compile(r"(دفعت|حولت|حوّلت|تم الدفع|تم التحويل|paid|sent|transferred|done)", re.I)
 
 RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
@@ -207,6 +206,8 @@ _S = [
      "💎 Type the product price in TON (e.g. 1.5) or /skip:"),
     ("ton_no_pending", "لا يوجد طلب دفع TON معلّق لك. اضغط «اشتري الآن» من /start.",
      "You have no pending TON order. Tap “Buy now” from /start."),
+    # كلمات يكتبها الزبون ليقول إنه دفع (مفصولة بـ | ، تُجمع من كل اللغات)
+    ("paid_words", "دفعت|حولت|حوّلت|تم الدفع|تم التحويل", "paid|sent|transferred|done|payment done"),
     ("help_ton", "\n/setwallet عنوان — محفظة TON لاستلام الدفع", "\n/setwallet address — TON wallet to receive payments"),
 
     # ── إشعارات الأدمن ──
@@ -367,6 +368,9 @@ _S = [
 ]
 
 STR = {"ar": {k: a for k, a, _ in _S}, "en": {k: e for k, _, e in _S}}
+
+# كلمات «دفعت» من كل اللغات تُجمع في تعبير واحد (يفهمها البوت مهما كانت لغة المتجر)
+PAID_RE = re.compile("(" + "|".join(STR[l]["paid_words"] for l in LANGS) + ")", re.I)
 
 # اللغة الحالية للتحديث الجاري
 _lang = ContextVar("lang", default=DEFAULT_LANG)
