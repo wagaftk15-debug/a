@@ -43,9 +43,9 @@ MAX_PHOTOS = 10
 DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
 # حالات طلب الزبون
-PHONE, WILAYA, ADDRESS, CONFIRM = range(4)
+PHONE, WILAYA, ADDRESS, CONFIRM, EXTRA = range(5)
 # حالات الأدمن
-A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE = range(20, 28)
+A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE, X_LABEL, X_TYPE = range(20, 30)
 
 WILAYAS = [
     "أدرار", "الشلف", "الأغواط", "أم البواقي", "باتنة", "بجاية", "بسكرة", "بشار", "البليدة", "البويرة",
@@ -214,6 +214,11 @@ def init_db():
     # الصفوف القديمة تأخذ 0 = البوت الرئيسي
     ensure_column("shop_products", "shop_id", "BIGINT DEFAULT 0")
     ensure_column("shop_orders", "shop_id", "BIGINT DEFAULT 0")
+    # الحقل المخصص (يرسله الزبون: رقم أو نص)
+    ensure_column("shop_products", "extra_label", "TEXT")
+    ensure_column("shop_products", "extra_type", "TEXT")
+    ensure_column("shop_orders", "extra_label", "TEXT")
+    ensure_column("shop_orders", "extra_value", "TEXT")
 
     if USE_PG:
         with cursor() as cur:
@@ -264,7 +269,8 @@ def get_setting(key, default=""):
 
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
-PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active"}
+PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active",
+                  "extra_label", "extra_type"}
 
 
 def add_product(name, desc, price, stock, shipping, active=1):
@@ -359,7 +365,7 @@ def availability(pid, uid):
     return "available" if p["stock"] - held > 0 else "held"
 
 
-def place_order(user, pid, phone, wilaya, address):
+def place_order(user, pid, phone, wilaya, address, extra=None):
     """ينشئ الطلب ويحجز القطعة. returns (order_id, 'ok') أو (None, 'sold'/'held')"""
     with cursor() as cur:
         p = _lock_product(cur, pid)
@@ -375,10 +381,11 @@ def place_order(user, pid, phone, wilaya, address):
         cur.execute("""
             INSERT INTO shop_orders
               (user_id, username, full_name, phone, wilaya, address, amount, created_at,
-               product_id, product_name, reserved_until, shop_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id
+               product_id, product_name, reserved_until, shop_id, extra_label, extra_value)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id
         """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address,
-              p["price"], now, pid, p["name"], now + RESERVE_MINUTES * 60, shop_id()))
+              p["price"], now, pid, p["name"], now + RESERVE_MINUTES * 60, shop_id(),
+              p.get("extra_label") if extra else None, extra))
         return cur.fetchone()["id"], "ok"
 
 
@@ -485,6 +492,8 @@ def order_text(o):
         t += f"📱 +{esc(o['phone'])}\n📍 {esc(o['wilaya'])}\n🏠 {esc(o['address'])}\n"
     else:
         t += "💾 منتج رقمي\n"
+    if o.get("extra_value"):
+        t += f"🧩 {esc(o.get('extra_label') or 'حقل')}: <code>{esc(o['extra_value'])}</code>\n"
     t += f"💰 {o['amount']}⭐"
     return t
 
@@ -614,8 +623,43 @@ async def send_summary(message, context):
         text += f"📱 +{esc(d['phone'])}\n📍 {esc(d['wilaya'])}\n🏠 {esc(d['address'])}\n"
     else:
         text += "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n"
+    if p.get("extra_label") and d.get("extra"):
+        text += f"🧩 {esc(p['extra_label'])}: <b>{esc(d['extra'])}</b>\n"
     text += f"\n💰 المبلغ: <b>{p['price']}⭐</b>"
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def ask_extra_or_summary(message, context, p):
+    """يسأل الزبون عن الحقل المخصص (إن وُجد ولم يُجب عنه) وإلا يعرض الملخص."""
+    if p.get("extra_label") and "extra" not in context.user_data:
+        hint = "(أرسل أرقاماً فقط)" if p.get("extra_type") == "number" else "(أرسل نصاً)"
+        await message.reply_text(f"🧩 {esc(p['extra_label'])}\n{hint}\n\n(للإلغاء: /cancel)")
+        return EXTRA
+    await send_summary(message, context)
+    return CONFIRM
+
+
+AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
+async def got_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    d = context.user_data
+    p = get_product(d["pid"]) if d.get("pid") else None
+    if not p or not p.get("extra_label"):
+        await update.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        return ConversationHandler.END
+    t = update.message.text.strip()
+    if p.get("extra_type") == "number":
+        t = t.translate(AR_DIGITS).replace(" ", "")
+        if not re.fullmatch(r"\d{1,30}", t):
+            await update.message.reply_text("⚠️ أرسل أرقاماً فقط (بدون حروف أو رموز).")
+            return EXTRA
+    elif not (1 <= len(t) <= 300):
+        await update.message.reply_text("⚠️ اكتب نصاً من 1 إلى 300 حرف.")
+        return EXTRA
+    d["extra"] = t
+    await send_summary(update.message, context)
+    return CONFIRM
 
 
 async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -631,8 +675,7 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pid"] = pid
 
     if not p["shipping"]:  # منتج رقمي: لا هاتف ولا ولاية ولا عنوان
-        await send_summary(q.message, context)
-        return CONFIRM
+        return await ask_extra_or_summary(q.message, context, p)
 
     kb = ReplyKeyboardMarkup(
         [[KeyboardButton("📱 مشاركة رقم هاتفي", request_contact=True)]],
@@ -688,8 +731,11 @@ async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ العنوان قصير جداً أو طويل جداً. اكتب عنواناً واضحاً (10 – 300 حرف).")
         return ADDRESS
     context.user_data["address"] = addr
-    await send_summary(update.message, context)
-    return CONFIRM
+    p = get_product(context.user_data.get("pid") or 0)
+    if not p:
+        await update.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        return ConversationHandler.END
+    return await ask_extra_or_summary(update.message, context, p)
 
 
 async def restart_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -712,7 +758,11 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
         return ConversationHandler.END
 
-    oid, why = place_order(q.from_user, pid, d.get("phone"), d.get("wilaya"), d.get("address"))
+    if p.get("extra_label") and not d.get("extra"):
+        await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        return ConversationHandler.END
+
+    oid, why = place_order(q.from_user, pid, d.get("phone"), d.get("wilaya"), d.get("address"), d.get("extra"))
     if not oid:
         await q.message.reply_text(UNAVAILABLE.get(why, UNAVAILABLE["sold"]))
         return ConversationHandler.END
@@ -841,6 +891,9 @@ def panel_text(p):
         f"📷 الوسائط (صور/فيديو): {n}\n"
         f"الحالة: {'✅ ظاهر للزبائن' if p['active'] else '🚫 مخفي'}\n"
     )
+    if p.get("extra_label"):
+        kind = "🔢 رقم" if p.get("extra_type") == "number" else "🔤 نص"
+        t += f"🧩 حقل الزبون: {esc(p['extra_label'])} ({kind})\n"
     if not p["shipping"]:
         t += (
             f"🎁 محتوى التسليم: نص {'✅' if p['delivery_text'] else '❌'} | "
@@ -865,6 +918,7 @@ def panel_markup(p):
     ]
     if not p["shipping"]:
         rows.append([InlineKeyboardButton("🎁 محتوى التسليم", callback_data=f"edt_deliv_{i}")])
+    rows.append([InlineKeyboardButton("🧩 حقل يرسله الزبون", callback_data=f"edt_extra_{i}")])
     rows.append([InlineKeyboardButton("🚫 إخفاء" if p["active"] else "✅ إظهار", callback_data=f"adm_active_{i}"),
                  InlineKeyboardButton("❌ حذف", callback_data=f"adm_del_{i}")])
     rows.append([InlineKeyboardButton("🔙 المنتجات", callback_data="adm_list")])
@@ -1144,6 +1198,13 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if field == "deliv":
         await ask_delivery(q.message)
         return A_DELIV
+    if field == "extra":
+        await q.message.reply_text(
+            "🧩 اكتب <b>السؤال/الطلب الذي سيظهر للزبون</b> قبل الدفع.\n"
+            "مثال: <i>أرسل رقم حسابك (ID)</i> أو <i>اكتب اسم اللاعب</i>\n\n"
+            "أرسل <b>-</b> لحذف الحقل.\n(للإلغاء: /cancel)"
+        )
+        return X_LABEL
     await q.message.reply_text(EDIT_PROMPTS[field] + "\n(للإلغاء: /cancel)")
     return E_VALUE
 
@@ -1179,6 +1240,44 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("adm", None)
     await update.message.reply_text("✅ تم التحديث.")
     await render_panel(update.message, pid)
+    return ConversationHandler.END
+
+
+async def got_x_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    t = update.message.text.strip()
+    if t == "-":
+        update_product(a["pid"], extra_label=None, extra_type=None)
+        pid = a["pid"]
+        context.user_data.pop("adm", None)
+        await update.message.reply_text("🗑 تم حذف الحقل.")
+        await render_panel(update.message, pid)
+        return ConversationHandler.END
+    if not (2 <= len(t) <= 200):
+        await update.message.reply_text("⚠️ اكتب نصاً من 2 إلى 200 حرف.")
+        return X_LABEL
+    a["xlabel"] = t
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔢 رقم فقط", callback_data="xt_num"),
+        InlineKeyboardButton("🔤 نص حر", callback_data="xt_text"),
+    ]])
+    await update.message.reply_text("ما <b>نوع الإجابة</b> المطلوبة من الزبون؟", reply_markup=kb)
+    return X_TYPE
+
+
+async def got_x_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return ConversationHandler.END
+    a = adm(context)
+    pid = a.get("pid")
+    if not pid or not a.get("xlabel"):
+        return ConversationHandler.END
+    update_product(pid, extra_label=a["xlabel"], extra_type="number" if q.data == "xt_num" else "text")
+    context.user_data.pop("adm", None)
+    await q.message.reply_text("✅ تم حفظ الحقل. سيُطلب من الزبون قبل الدفع.")
+    await render_panel(q.message, pid)
     return ConversationHandler.END
 
 
@@ -1478,7 +1577,7 @@ def register_handlers(app: Application, is_main: bool):
         entry_points=[
             CommandHandler("addproduct", cmd_addproduct),
             CallbackQueryHandler(new_product_cb, pattern=r"^adm_new$"),
-            CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|stock|photos|deliv)_\d+$"),
+            CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|stock|photos|deliv|extra)_\d+$"),
         ],
         states={
             A_NAME: [MessageHandler(text_only, got_name)],
@@ -1500,6 +1599,8 @@ def register_handlers(app: Application, is_main: bool):
                 MessageHandler(text_only, got_deliv_text),
             ],
             E_VALUE: [MessageHandler(text_only, got_edit_value)],
+            X_LABEL: [MessageHandler(text_only, got_x_label)],
+            X_TYPE: [CallbackQueryHandler(got_x_type, pattern=r"^xt_(num|text)$")],
         },
         fallbacks=[
             CommandHandler("cancel", adm_cancel),
@@ -1517,6 +1618,7 @@ def register_handlers(app: Application, is_main: bool):
             ],
             WILAYA: [CallbackQueryHandler(got_wilaya, pattern=r"^w_\d+$")],
             ADDRESS: [MessageHandler(text_only, got_address)],
+            EXTRA: [MessageHandler(text_only, got_extra)],
             CONFIRM: [
                 CallbackQueryHandler(pay_cb, pattern="^pay$"),
                 CallbackQueryHandler(restart_cb, pattern="^restart$"),
