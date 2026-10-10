@@ -78,9 +78,9 @@ _S = [
     ("no_products", "🚧 لا توجد منتجات حالياً.", "🚧 No products available right now."),
     ("admin_add_hint", "\n\nأنت الأدمن: اكتب /addproduct لإضافة أول منتج.",
      "\n\nYou are the admin: send /addproduct to add your first product."),
-    ("btn_lang", "🌐 اللغة / Language", "🌐 اللغة / Language"),
-    ("lang_pick", "🌐 اختر اللغة:\nChoose your language:", "🌐 اختر اللغة:\nChoose your language:"),
-    ("lang_set", "✅ تم تغيير اللغة إلى العربية.", "✅ Language changed to English."),
+    ("lang_pick", "🌐 اختر لغة المتجر (تُطبَّق على الجميع):\nChoose the shop language (applies to everyone):",
+     "🌐 اختر لغة المتجر (تُطبَّق على الجميع):\nChoose the shop language (applies to everyone):"),
+    ("lang_set", "✅ تم تغيير لغة المتجر إلى العربية للجميع.", "✅ Shop language changed to English for everyone."),
     ("btn_all_products", "🔙 كل المنتجات", "🔙 All products"),
     ("list_title", "🛍 <b>منتجاتنا</b>\n\nاختر منتجاً لعرض تفاصيله 👇",
      "🛍 <b>Our products</b>\n\nPick a product to see its details 👇"),
@@ -249,8 +249,8 @@ _S = [
     ("refund_fail", "فشل الاسترجاع: {err}", "Refund failed: {err}"),
     ("refund_ok", "💸 تم استرجاع {amount}⭐ للطلب #{id}.", "💸 Refunded {amount}⭐ for order #{id}."),
     ("help_admin",
-     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقل الزبون، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير اللغة",
-     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer field, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change language"),
+     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقل الزبون، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير لغة المتجر للجميع",
+     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer field, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change the shop language (for everyone)"),
     ("help_multi",
      "\n\n🤖 <b>البوتات المتعددة</b>\nأرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n/bots — البوتات المرتبطة\n/delbot ID — فصل بوت وإيقافه",
      "\n\n🤖 <b>Multiple bots</b>\nSend a <b>new bot token</b> (from @BotFather) here to link and start it right away.\n/bots — linked bots\n/delbot ID — unlink and stop a bot"),
@@ -272,7 +272,7 @@ _S = [
      "🗑 @{u} was stopped and unlinked.\n(Its data is kept; if you send its token again it comes back with its products.)"),
     # الأوامر (القائمة)
     ("cmd_start", "🏠 الصفحة الرئيسية", "🏠 Home"),
-    ("cmd_lang", "🌐 اللغة / Language", "🌐 اللغة / Language"),
+    ("cmd_lang", "🌐 لغة المتجر للجميع", "🌐 Shop language (for everyone)"),
     ("cmd_addproduct", "➕ إضافة منتج", "➕ Add product"),
     ("cmd_products", "🗂 إدارة المنتجات", "🗂 Manage products"),
     ("cmd_orders", "📦 الطلبات المدفوعة", "📦 Paid orders"),
@@ -458,14 +458,6 @@ def init_db():
                 created_at BIGINT
             )
         """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS shop_users (
-                shop_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                lang TEXT,
-                PRIMARY KEY (shop_id, user_id)
-            )
-        """)
 
     # ترحيل أعمدة الطلبات القديمة
     ensure_column("shop_orders", "product_id", "INT")
@@ -529,35 +521,34 @@ def get_setting(key, default=""):
         return default
 
 
-# ── اللغة لكل مستخدم ──
-_LANG_CACHE = {}
+# ── لغة المتجر (يحددها الأدمن وتسري على الجميع) ──
+_SHOP_LANG = {}
 
 
-def get_lang(sid, uid):
-    k = (sid, uid)
-    if k in _LANG_CACHE:
-        return _LANG_CACHE[k]
+def get_shop_lang(sid):
+    if sid in _SHOP_LANG:
+        return _SHOP_LANG[sid]
     lang = DEFAULT_LANG
     try:
         with cursor() as cur:
-            cur.execute("SELECT lang FROM shop_users WHERE shop_id=? AND user_id=?", (sid, uid))
+            cur.execute("SELECT value FROM shop_settings WHERE key=?", (f"lang_{sid}",))
             r = cur.fetchone()
-        if r and r["lang"] in LANGS:
-            lang = r["lang"]
+        if r and r["value"] in LANGS:
+            lang = r["value"]
     except Exception as e:
-        log.warning("get_lang failed: %s", e)
-    _LANG_CACHE[k] = lang
+        log.warning("get_shop_lang failed: %s", e)
+    _SHOP_LANG[sid] = lang
     return lang
 
 
-def set_lang(sid, uid, lang):
+def set_shop_lang(sid, lang):
     with cursor() as cur:
         cur.execute(
-            "INSERT INTO shop_users (shop_id, user_id, lang) VALUES (?,?,?) "
-            "ON CONFLICT (shop_id, user_id) DO UPDATE SET lang=excluded.lang",
-            (sid, uid, lang),
+            "INSERT INTO shop_settings (key, value) VALUES (?,?) "
+            "ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+            (f"lang_{sid}", lang),
         )
-    _LANG_CACHE[(sid, uid)] = lang
+    _SHOP_LANG[sid] = lang
 
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
@@ -804,10 +795,6 @@ def wilaya_keyboard():
     return InlineKeyboardMarkup(rows)
 
 
-def lang_button():
-    return [InlineKeyboardButton(T("btn_lang"), callback_data="lang_menu")]
-
-
 # ───────────────────────── واجهة الزبون ─────────────────────────
 def is_admin(update):
     a = shop_admin()
@@ -819,7 +806,6 @@ async def show_list(message, prods):
     for p in prods:
         mark = "❌ " if p["stock"] == 0 else ("🛠 " if p["shipping"] else "💾 ")
         rows.append([InlineKeyboardButton(f"{mark}{p['name'][:40]} — {p['price']}⭐", callback_data=f"prod_{p['id']}")])
-    rows.append(lang_button())
     await message.reply_text(T("list_title"), reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -845,8 +831,7 @@ async def show_product(message, p, uid):
         text += T("unavail_" + state)
     if len(list_products()) > 1:
         rows.append([InlineKeyboardButton(T("btn_all_products"), callback_data="list")])
-    rows.append(lang_button())
-    markup = InlineKeyboardMarkup(rows)
+    markup = InlineKeyboardMarkup(rows) if rows else None
 
     media = get_media(p["id"])[:MAX_PHOTOS]
     try:
@@ -915,22 +900,22 @@ def lang_keyboard():
 
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
     await update.message.reply_text(T("lang_pick"), reply_markup=lang_keyboard())
 
 
 async def lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    if q.data == "lang_menu":
-        await q.message.reply_text(T("lang_pick"), reply_markup=lang_keyboard())
+    if not is_admin(update):
         return
     lang = q.data.split("_")[1]
     if lang not in LANGS:
         return
-    set_lang(shop_id(), q.from_user.id, lang)
+    set_shop_lang(shop_id(), lang)   # تسري على كل زبائن هذا المتجر
     _lang.set(lang)
-    if is_admin(update):
-        await set_admin_commands(context.bot, shop_admin(), shop_id())
+    await setup_commands(context.bot, shop_admin(), shop_id())
     try:
         await q.message.edit_text(T("lang_set"))
     except Exception:
@@ -1134,7 +1119,7 @@ async def notify_admin(context, build):
     a = shop_admin()
     if a:
         try:
-            text = build(get_lang(shop_id(), a))
+            text = build(get_shop_lang(shop_id()))
             await context.bot.send_message(a, text)
         except Exception as e:
             log.error("admin notify failed: %s", e)
@@ -1608,7 +1593,7 @@ async def cmd_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             # رسالة الزبون بلغته هو
             await context.bot.send_message(
-                o["user_id"], T("shipped_user", get_lang(shop_id(), o["user_id"]), id=o["id"]))
+                o["user_id"], T("shipped_user", id=o["id"]))
         except Exception:
             pass
 
@@ -1634,7 +1619,7 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(T("refund_ok", amount=o["amount"], id=o["id"]))
     try:
         await context.bot.send_message(
-            o["user_id"], T("refunded_user", get_lang(shop_id(), o["user_id"]), id=o["id"]))
+            o["user_id"], T("refunded_user", id=o["id"]))
     except Exception:
         pass
 
@@ -1737,8 +1722,7 @@ async def bind_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يعمل أولاً مع كل تحديث: يحدد المتجر ولغة المستخدم."""
     shop = context.application.bot_data["shop"]
     _shop.set(shop)
-    u = update.effective_user
-    _lang.set(get_lang(shop["id"], u.id) if u else DEFAULT_LANG)
+    _lang.set(get_shop_lang(shop["id"]))
 
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
@@ -1768,21 +1752,23 @@ async def set_admin_commands(bot, admin_id, sid):
     if not admin_id:
         return
     try:
-        lang = get_lang(sid, admin_id)
+        lang = get_shop_lang(sid)
         await bot.set_my_commands(admin_commands(lang, sid == 0), scope=BotCommandScopeChat(admin_id))
     except Exception as e:
         log.warning("admin set_my_commands failed: %s", e)
 
 
 def user_commands(lang):
-    return [BotCommand("start", T("cmd_start", lang)), BotCommand("lang", T("cmd_lang", lang))]
+    return [BotCommand("start", T("cmd_start", lang))]
 
 
 async def setup_commands(bot, admin_id, sid):
     try:
-        await bot.set_my_commands(user_commands(DEFAULT_LANG), scope=BotCommandScopeDefault())
-        for lg in LANGS:
-            await bot.set_my_commands(user_commands(lg), scope=BotCommandScopeDefault(), language_code=lg)
+        lang = get_shop_lang(sid)
+        cmds = user_commands(lang)
+        await bot.set_my_commands(cmds, scope=BotCommandScopeDefault())
+        for lg in LANGS:  # نفس اللغة للجميع مهما كانت لغة هاتفهم
+            await bot.set_my_commands(cmds, scope=BotCommandScopeDefault(), language_code=lg)
     except Exception as e:
         log.warning("default set_my_commands failed: %s", e)
     await set_admin_commands(bot, admin_id, sid)
@@ -1826,7 +1812,7 @@ async def post_init(app: Application):
     await load_shops()
     if not ADMIN_ID:
         return
-    L = get_lang(0, ADMIN_ID)
+    L = get_shop_lang(0)
     msg = T("su_ok", L)
     if USE_PG:
         msg += T("su_pg", L)
@@ -1918,7 +1904,7 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("lang", cmd_lang))
-    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^(lang_menu|setlang_(ar|en))$"))
+    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^setlang_(ar|en)$"))
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(list_cb, pattern=r"^list$"))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
