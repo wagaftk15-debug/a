@@ -42,6 +42,12 @@ RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
 DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
+# اللغة الافتراضية لمن لم يختر لغة بعد: ar أو en
+LANGS = ("ar", "en")
+DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "ar").lower()
+if DEFAULT_LANG not in LANGS:
+    DEFAULT_LANG = "ar"
+
 # حالات طلب الزبون
 PHONE, WILAYA, ADDRESS, CONFIRM, EXTRA = range(5)
 # حالات الأدمن
@@ -55,6 +61,253 @@ WILAYAS = [
     "سوق أهراس", "تيبازة", "ميلة", "عين الدفلى", "النعامة", "عين تموشنت", "غرداية", "غليزان", "تيميمون",
     "برج باجي مختار", "أولاد جلال", "بني عباس", "عين صالح", "عين قزام", "تقرت", "جانت", "المغير", "المنيعة",
 ]
+
+WILAYAS_EN = [
+    "Adrar", "Chlef", "Laghouat", "Oum El Bouaghi", "Batna", "Béjaïa", "Biskra", "Béchar", "Blida", "Bouira",
+    "Tamanrasset", "Tébessa", "Tlemcen", "Tiaret", "Tizi Ouzou", "Algiers", "Djelfa", "Jijel", "Sétif", "Saïda",
+    "Skikda", "Sidi Bel Abbès", "Annaba", "Guelma", "Constantine", "Médéa", "Mostaganem", "M'Sila", "Mascara", "Ouargla",
+    "Oran", "El Bayadh", "Illizi", "Bordj Bou Arréridj", "Boumerdès", "El Tarf", "Tindouf", "Tissemsilt", "El Oued", "Khenchela",
+    "Souk Ahras", "Tipaza", "Mila", "Aïn Defla", "Naâma", "Aïn Témouchent", "Ghardaïa", "Relizane", "Timimoun",
+    "Bordj Badji Mokhtar", "Ouled Djellal", "Béni Abbès", "In Salah", "In Guezzam", "Touggourt", "Djanet", "El M'Ghair", "El Menia",
+]
+
+# ───────────────────────── النصوص (عربي / English) ─────────────────────────
+# (المفتاح، العربية، English)
+_S = [
+    # عام
+    ("no_products", "🚧 لا توجد منتجات حالياً.", "🚧 No products available right now."),
+    ("admin_add_hint", "\n\nأنت الأدمن: اكتب /addproduct لإضافة أول منتج.",
+     "\n\nYou are the admin: send /addproduct to add your first product."),
+    ("btn_lang", "🌐 اللغة / Language", "🌐 اللغة / Language"),
+    ("lang_pick", "🌐 اختر اللغة:\nChoose your language:", "🌐 اختر اللغة:\nChoose your language:"),
+    ("lang_set", "✅ تم تغيير اللغة إلى العربية.", "✅ Language changed to English."),
+    ("btn_all_products", "🔙 كل المنتجات", "🔙 All products"),
+    ("list_title", "🛍 <b>منتجاتنا</b>\n\nاختر منتجاً لعرض تفاصيله 👇",
+     "🛍 <b>Our products</b>\n\nPick a product to see its details 👇"),
+    ("product_gone", "هذا المنتج لم يعد متوفراً.", "This product is no longer available."),
+    ("price_line", "💰 السعر: <b>{price} ⭐</b> (نجوم تيليجرام)\n", "💰 Price: <b>{price} ⭐</b> (Telegram Stars)\n"),
+    ("stock_line", "📦 المتوفر: <b>{n}</b>\n", "📦 In stock: <b>{n}</b>\n"),
+    ("dz_only", "🇩🇿 البيع والتوصيل داخل الجزائر فقط\n", "🇩🇿 Sales and delivery inside Algeria only\n"),
+    ("digital_note", "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n", "💾 Digital product — delivered right after payment\n"),
+    ("buy_prompt", "اضغط الزر أدناه لإتمام الطلب 👇", "Tap the button below to order 👇"),
+    ("btn_buy", "🛒 اشتري الآن", "🛒 Buy now"),
+    ("unavail_sold", "❌ للأسف، نفدت الكمية.", "❌ Sorry, this item is sold out."),
+    ("unavail_held", "⏳ القطعة محجوزة حالياً لزبون آخر (يدفع الآن). جرّب بعد عدة دقائق، فقد تعود متاحة.",
+     "⏳ This item is currently reserved for another customer (paying now). Try again in a few minutes; it may become available."),
+    ("unlimited", "غير محدود", "Unlimited"),
+    # خطوات الطلب
+    ("btn_cancel", "❌ إلغاء", "❌ Cancel"),
+    ("btn_pay", "💳 تأكيد والدفع {price}⭐", "💳 Confirm & pay {price}⭐"),
+    ("btn_edit_addr", "✏️ تعديل الولاية/العنوان", "✏️ Edit wilaya/address"),
+    ("summary_title", "📋 <b>راجع طلبك:</b>\n\n🛍 {name}\n", "📋 <b>Review your order:</b>\n\n🛍 {name}\n"),
+    ("summary_amount", "\n💰 المبلغ: <b>{price}⭐</b>", "\n💰 Amount: <b>{price}⭐</b>"),
+    ("phone_ask",
+     "🇩🇿 للتأكد أنك من الجزائر، شارك رقم هاتفك بالضغط على الزر أدناه.\n(يجب أن يكون الرقم جزائري +213 ومرتبط بحسابك)",
+     "🇩🇿 To confirm you are in Algeria, share your phone number using the button below.\n(It must be an Algerian +213 number linked to your account)"),
+    ("btn_share_phone", "📱 مشاركة رقم هاتفي", "📱 Share my phone number"),
+    ("phone_not_yours", "⚠️ يرجى مشاركة رقمك أنت، وليس رقم شخص آخر.", "⚠️ Please share your own number, not someone else's."),
+    ("phone_not_dz", "🚫 عذراً، البيع متاح فقط لأصحاب أرقام الهاتف الجزائرية (+213).",
+     "🚫 Sorry, sales are only available to Algerian phone numbers (+213)."),
+    ("phone_ok", "✅ تم التحقق من رقمك.", "✅ Your number is verified."),
+    ("pick_wilaya", "📍 اختر ولايتك:", "📍 Choose your wilaya (province):"),
+    ("phone_hint", "اضغط على زر «📱 مشاركة رقم هاتفي» أسفل الشاشة، أو /cancel للإلغاء.",
+     "Tap the “📱 Share my phone number” button at the bottom of the screen, or /cancel to cancel."),
+    ("wilaya_chosen",
+     "📍 الولاية: <b>{w}</b>\n\n🏠 الآن اكتب عنوانك الكامل للتوصيل:\nالبلدية، الحي، الشارع، رقم المنزل، وأي علامة مميزة.",
+     "📍 Wilaya: <b>{w}</b>\n\n🏠 Now type your full delivery address:\nMunicipality, neighborhood, street, house number, and any landmark."),
+    ("addr_bad", "⚠️ العنوان قصير جداً أو طويل جداً. اكتب عنواناً واضحاً (10 – 300 حرف).",
+     "⚠️ The address is too short or too long. Write a clear address (10–300 characters)."),
+    ("extra_hint_num", "(أرسل أرقاماً فقط)", "(send digits only)"),
+    ("extra_hint_text", "(أرسل نصاً)", "(send text)"),
+    ("cancel_hint", "(للإلغاء: /cancel)", "(to cancel: /cancel)"),
+    ("extra_bad_num", "⚠️ أرسل أرقاماً فقط (بدون حروف أو رموز).", "⚠️ Send digits only (no letters or symbols)."),
+    ("extra_bad_text", "⚠️ اكتب نصاً من 1 إلى 300 حرف.", "⚠️ Write text between 1 and 300 characters."),
+    ("session_expired", "انتهت الجلسة، اكتب /start للبدء من جديد.", "Session expired. Send /start to begin again."),
+    ("reserved", "⏳ تم حجز طلبك لمدة {m} دقائق. أكمل الدفع من الفاتورة أدناه 👇",
+     "⏳ Your order is reserved for {m} minutes. Complete the payment using the invoice below 👇"),
+    ("invoice_ship_desc", "{name} — توصيل داخل الجزائر", "{name} — delivery inside Algeria"),
+    ("cancelled", "تم إلغاء الطلب. اكتب /start للبدء من جديد.", "Order cancelled. Send /start to begin again."),
+    # الدفع
+    ("precheck_fail", "عذراً، المنتج لم يعد متاحاً أو انتهت مهلة الحجز.",
+     "Sorry, the product is no longer available or the reservation expired."),
+    ("your_product", "🎁 <b>منتجك:</b>\n\n{text}", "🎁 <b>Your product:</b>\n\n{text}"),
+    ("paid_ok_digital", "✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>",
+     "✅ <b>Payment successful!</b>\n\nYour order number: <b>#{oid}</b>"),
+    ("will_send", "سيصلك المنتج من المشرف قريباً 🙏", "The admin will send you the product shortly 🙏"),
+    ("paid_ok_ship",
+     "✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>\nسنتواصل معك على رقمك لتأكيد التوصيل قريباً. شكراً لثقتك 🙏",
+     "✅ <b>Payment successful!</b>\n\nYour order number: <b>#{oid}</b>\nWe will contact you on your number to confirm delivery soon. Thank you for your trust 🙏"),
+    ("refunded_soldout", "⚠️ نعتذر، المنتج بيع للتو. تم استرجاع نجومك بالكامل ✅",
+     "⚠️ Sorry, the product was just sold. Your stars have been fully refunded ✅"),
+    ("refund_problem", "⚠️ حدثت مشكلة، سيتواصل معك المشرف لاسترجاع نجومك.",
+     "⚠️ A problem occurred; the admin will contact you to refund your stars."),
+    ("shipped_user", "🚚 طلبك #{id} في الطريق إليك! سيتصل بك المُوصِّل قريباً.",
+     "🚚 Your order #{id} is on its way! The courier will contact you soon."),
+    ("refunded_user", "💸 تم استرجاع نجوم الطلب #{id} إلى حسابك.", "💸 The stars for order #{id} have been refunded to your account."),
+    # إشعارات الأدمن
+    ("adm_digital_nodeliv", "⚠️ طلب رقمي #{oid} بلا محتوى تسليم! أرسله للزبون يدوياً (ID: <code>{uid}</code>).",
+     "⚠️ Digital order #{oid} has no delivery content! Send it to the customer manually (ID: <code>{uid}</code>)."),
+    ("adm_new_paid", "🔔 <b>طلب مدفوع جديد!</b>\n\n", "🔔 <b>New paid order!</b>\n\n"),
+    ("adm_late", "⚠️ دفع متأخر للطلب #{oid} (نفدت الكمية) — تم الاسترجاع تلقائياً.",
+     "⚠️ Late payment for order #{oid} (sold out) — refunded automatically."),
+    ("adm_manual_refund",
+     "🚨 <b>يلزم استرجاع يدوي</b>\nالمستخدم: <code>{uid}</code>\ncharge_id: <code>{charge}</code>\nالخطأ: {err}",
+     "🚨 <b>Manual refund needed</b>\nUser: <code>{uid}</code>\ncharge_id: <code>{charge}</code>\nError: {err}"),
+    ("ot_head", "📦 <b>طلب #{id}</b> — {status}", "📦 <b>Order #{id}</b> — {status}"),
+    ("ot_digital", "💾 منتج رقمي", "💾 Digital product"),
+    # لوحة المنتجات
+    ("not_found", "المنتج غير موجود.", "Product not found."),
+    ("pt_type_ship", "النوع: 🚚 مادي (شحن + ولايات)", "Type: 🚚 Physical (shipping + wilayas)"),
+    ("pt_type_dig", "النوع: 💾 رقمي (بدون شحن)", "Type: 💾 Digital (no shipping)"),
+    ("pt_price", "💰 السعر: {p}⭐", "💰 Price: {p}⭐"),
+    ("pt_stock", "📦 المخزون: {s}", "📦 Stock: {s}"),
+    ("pt_media", "📷 الوسائط (صور/فيديو): {n}", "📷 Media (photos/videos): {n}"),
+    ("pt_visible", "الحالة: ✅ ظاهر للزبائن", "Status: ✅ Visible to customers"),
+    ("pt_hidden", "الحالة: 🚫 مخفي", "Status: 🚫 Hidden"),
+    ("pt_extra", "🧩 حقل الزبون: {label} ({kind})", "🧩 Customer field: {label} ({kind})"),
+    ("kind_num", "🔢 رقم", "🔢 Number"),
+    ("kind_text", "🔤 نص", "🔤 Text"),
+    ("pt_deliv", "🎁 محتوى التسليم: نص {a} | ملف {b}", "🎁 Delivery content: text {a} | file {b}"),
+    ("b_name", "✏️ الاسم", "✏️ Name"),
+    ("b_desc", "📝 الوصف", "📝 Description"),
+    ("b_price", "💰 السعر", "💰 Price"),
+    ("b_stock", "📊 المخزون", "📊 Stock"),
+    ("b_photos", "📷 تغيير الصور/الفيديو", "📷 Change photos/videos"),
+    ("b_clr", "🧹 مسح الوسائط", "🧹 Clear media"),
+    ("b_to_dig", "🔁 تحويل إلى رقمي", "🔁 Switch to digital"),
+    ("b_to_phys", "🔁 تحويل إلى مادي (شحن)", "🔁 Switch to physical (shipping)"),
+    ("b_deliv", "🎁 محتوى التسليم", "🎁 Delivery content"),
+    ("b_extra", "🧩 حقل يرسله الزبون", "🧩 Customer input field"),
+    ("b_hide", "🚫 إخفاء", "🚫 Hide"),
+    ("b_show", "✅ إظهار", "✅ Show"),
+    ("b_del", "❌ حذف", "❌ Delete"),
+    ("b_back", "🔙 المنتجات", "🔙 Products"),
+    ("b_add", "➕ إضافة منتج", "➕ Add product"),
+    ("products_title", "🗂 <b>المنتجات</b>\nاختر منتجاً لإدارته:", "🗂 <b>Products</b>\nPick a product to manage:"),
+    ("del_ask", "⚠️ حذف «{name}» نهائياً؟", "⚠️ Delete “{name}” permanently?"),
+    ("b_yes_del", "✅ نعم، احذف", "✅ Yes, delete"),
+    ("b_no", "🔙 لا", "🔙 No"),
+    ("deleted", "🗑 تم حذف المنتج.", "🗑 Product deleted."),
+    # إضافة منتج
+    ("new_title", "➕ <b>منتج جديد</b>\n\nاكتب <b>اسم المنتج</b>:\n(للإلغاء: /cancel)",
+     "➕ <b>New product</b>\n\nType the <b>product name</b>:\n(to cancel: /cancel)"),
+    ("bad_name", "⚠️ اكتب اسماً من 2 إلى 100 حرف.", "⚠️ Enter a name of 2 to 100 characters."),
+    ("ask_price", "💰 اكتب <b>السعر</b> بالنجوم ⭐ (رقم فقط):", "💰 Type the <b>price</b> in stars ⭐ (number only):"),
+    ("bad_price", "⚠️ اكتب رقماً صحيحاً أكبر من 0.", "⚠️ Enter a whole number greater than 0."),
+    ("b_t_ship", "🚚 مادي — مع شحن (ولايات + عنوان)", "🚚 Physical — with shipping (wilaya + address)"),
+    ("b_t_dig", "💾 رقمي — بدون شحن", "💾 Digital — no shipping"),
+    ("pick_type", "اختر <b>نوع المنتج</b>:", "Choose the <b>product type</b>:"),
+    ("ask_stock_ship", "📦 اكتب <b>الكمية المتوفرة</b> (رقم):", "📦 Type the <b>available quantity</b> (number):"),
+    ("ask_stock_dig", "📦 اكتب عدد النسخ المتاحة، أو <b>0</b> لعدد غير محدود:",
+     "📦 Type the number of copies available, or <b>0</b> for unlimited:"),
+    ("bad_int", "⚠️ اكتب رقماً صحيحاً.", "⚠️ Enter a valid whole number."),
+    ("ask_desc", "📝 اكتب <b>وصف المنتج</b> (أو /skip للتخطي):", "📝 Type the <b>product description</b> (or /skip):"),
+    ("ask_media",
+     "📷 أرسل <b>صور و/أو فيديوهات المنتج</b> (حتى {n} في المجموع، كصور/فيديو وليس كملفات).\nعند الانتهاء اكتب /done — أو /skip إذا لا تريد وسائط.",
+     "📷 Send the <b>product photos and/or videos</b> (up to {n} in total, as photos/videos, not files).\nWhen finished send /done — or /skip for no media."),
+    ("media_max", "⚠️ الحد الأقصى {n} صور. اكتب /done للمتابعة.", "⚠️ Maximum {n} media items. Send /done to continue."),
+    ("what_video", "الفيديو", "video"),
+    ("what_photo", "الصورة", "photo"),
+    ("media_added", "✅ تمت إضافة {what} ({i}/{n}). أرسل غيرها أو اكتب /done.",
+     "✅ Added the {what} ({i}/{n}). Send more or /done."),
+    ("media_wrong", "⚠️ أرسل صورة أو فيديو (وليس كملف)، أو /done للمتابعة.",
+     "⚠️ Send a photo or video (not as a file), or /done to continue."),
+    ("saved_published", "✅ تم حفظ المنتج ونشره.", "✅ Product saved and published."),
+    ("ask_delivery",
+     "🎁 أرسل <b>ما سيستلمه الزبون بعد الدفع</b>:\n• نص (رابط / كود / تعليمات) — آخر نص يستبدل السابق\n• و/أو ملف (أرسله كـ Document)\n\nعند الانتهاء اكتب /done.",
+     "🎁 Send <b>what the customer receives after payment</b>:\n• Text (link / code / instructions) — the latest text replaces the previous one\n• and/or a file (send it as a Document)\n\nWhen finished send /done."),
+    ("deliv_text_saved", "✅ تم حفظ النص. أرسل ملفاً أيضاً أو اكتب /done.", "✅ Text saved. Send a file too, or /done."),
+    ("deliv_file_saved", "✅ تم حفظ الملف. أرسل نصاً أيضاً أو اكتب /done.", "✅ File saved. Send text too, or /done."),
+    # التعديل
+    ("ep_name", "✏️ اكتب الاسم الجديد:", "✏️ Type the new name:"),
+    ("ep_desc", "📝 اكتب الوصف الجديد (أو - لمسحه):", "📝 Type the new description (or - to clear it):"),
+    ("ep_price", "💰 اكتب السعر الجديد بالنجوم:", "💰 Type the new price in stars:"),
+    ("ep_stock", "📦 اكتب المخزون الجديد (للمنتج الرقمي: 0 = غير محدود):",
+     "📦 Type the new stock (digital product: 0 = unlimited):"),
+    ("photos_replace",
+     "📷 أرسل الصور/الفيديوهات الجديدة (حتى {n}) — ستستبدل القديمة.\nعند الانتهاء: /done  |  للإبقاء على القديمة: /skip",
+     "📷 Send the new photos/videos (up to {n}) — they will replace the old ones.\nWhen finished: /done  |  to keep the old ones: /skip"),
+    ("updated", "✅ تم التحديث.", "✅ Updated."),
+    ("adm_cancelled", "تم الإلغاء.", "Cancelled."),
+    # حقل الزبون
+    ("x_ask",
+     "🧩 اكتب <b>السؤال/الطلب الذي سيظهر للزبون</b> قبل الدفع.\nمثال: <i>أرسل رقم حسابك (ID)</i> أو <i>اكتب اسم اللاعب</i>\n\nأرسل <b>-</b> لحذف الحقل.\n(للإلغاء: /cancel)",
+     "🧩 Type the <b>question/request shown to the customer</b> before payment.\nExample: <i>Send your account ID</i> or <i>Type the player name</i>\n\nSend <b>-</b> to remove the field.\n(to cancel: /cancel)"),
+    ("x_removed", "🗑 تم حذف الحقل.", "🗑 Field removed."),
+    ("x_bad_len", "⚠️ اكتب نصاً من 2 إلى 200 حرف.", "⚠️ Enter text of 2 to 200 characters."),
+    ("b_x_num", "🔢 رقم فقط", "🔢 Numbers only"),
+    ("b_x_text", "🔤 نص حر", "🔤 Free text"),
+    ("x_type_ask", "ما <b>نوع الإجابة</b> المطلوبة من الزبون؟", "What <b>type of answer</b> do you want from the customer?"),
+    ("x_saved", "✅ تم حفظ الحقل. سيُطلب من الزبون قبل الدفع.", "✅ Field saved. It will be requested from the customer before payment."),
+    # الطلبات
+    ("no_orders", "لا توجد طلبات مدفوعة بعد.", "No paid orders yet."),
+    ("shipped_usage", "الاستعمال: <code>/shipped رقم_الطلب</code>", "Usage: <code>/shipped order_number</code>"),
+    ("shipped_bad", "الطلب غير موجود أو غير مدفوع.", "Order not found or not paid."),
+    ("shipped_ok", "✅ الطلب #{id} أصبح «تم الشحن».", "✅ Order #{id} marked as shipped."),
+    ("refund_usage", "الاستعمال: <code>/refund رقم_الطلب</code>", "Usage: <code>/refund order_number</code>"),
+    ("refund_bad", "لا يمكن استرجاع هذا الطلب.", "This order cannot be refunded."),
+    ("refund_fail", "فشل الاسترجاع: {err}", "Refund failed: {err}"),
+    ("refund_ok", "💸 تم استرجاع {amount}⭐ للطلب #{id}.", "💸 Refunded {amount}⭐ for order #{id}."),
+    ("help_admin",
+     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقل الزبون، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير اللغة",
+     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer field, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change language"),
+    ("help_multi",
+     "\n\n🤖 <b>البوتات المتعددة</b>\nأرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n/bots — البوتات المرتبطة\n/delbot ID — فصل بوت وإيقافه",
+     "\n\n🤖 <b>Multiple bots</b>\nSend a <b>new bot token</b> (from @BotFather) here to link and start it right away.\n/bots — linked bots\n/delbot ID — unlink and stop a bot"),
+    # البوتات المتعددة
+    ("tok_main", "⚠️ هذا توكن البوت الرئيسي نفسه.", "⚠️ This is the main bot's own token."),
+    ("tok_invalid", "❌ التوكن غير صالح: {err}", "❌ Invalid token: {err}"),
+    ("tok_fail", "❌ تعذّر تشغيل البوت: {err}", "❌ Could not start the bot: {err}"),
+    ("tok_ok",
+     "✅ تم ربط وتشغيل البوت <b>@{u}</b> (ID: <code>{id}</code>)\n\n🔗 افتحه: https://t.me/{u}\nاضغط /start هناك — أنت أدمنه، ثم استعمل /addproduct لإضافة منتجاتك.\n\nℹ️ منتجاته وطلباته منفصلة تماماً عن هذا البوت.\n🗑 لفصله لاحقاً: <code>/delbot {id}</code>",
+     "✅ Bot <b>@{u}</b> (ID: <code>{id}</code>) was linked and started\n\n🔗 Open it: https://t.me/{u}\nPress /start there — you are its admin, then use /addproduct to add your products.\n\nℹ️ Its products and orders are completely separate from this bot.\n🗑 To unlink it later: <code>/delbot {id}</code>"),
+    ("bots_none", "لا توجد بوتات مرتبطة. أرسل توكن بوت لإضافته.", "No linked bots. Send a bot token to add one."),
+    ("bots_title", "🤖 <b>البوتات المرتبطة</b>\n\n", "🤖 <b>Linked bots</b>\n\n"),
+    ("st_run", "🟢 يعمل", "🟢 Running"),
+    ("st_stop", "⚪ متوقف", "⚪ Stopped"),
+    ("st_off", "🚫 مفصول", "🚫 Unlinked"),
+    ("delbot_usage", "الاستعمال: <code>/delbot ID_البوت</code> (انظر /bots)", "Usage: <code>/delbot BOT_ID</code> (see /bots)"),
+    ("delbot_nf", "لا يوجد بوت بهذا الـ ID.", "No bot with this ID."),
+    ("delbot_ok", "🗑 تم إيقاف وفصل @{u}.\n(بياناته محفوظة؛ إن أرسلت توكنه مجدداً يعود بمنتجاته.)",
+     "🗑 @{u} was stopped and unlinked.\n(Its data is kept; if you send its token again it comes back with its products.)"),
+    # الأوامر (القائمة)
+    ("cmd_start", "🏠 الصفحة الرئيسية", "🏠 Home"),
+    ("cmd_lang", "🌐 اللغة / Language", "🌐 اللغة / Language"),
+    ("cmd_addproduct", "➕ إضافة منتج", "➕ Add product"),
+    ("cmd_products", "🗂 إدارة المنتجات", "🗂 Manage products"),
+    ("cmd_orders", "📦 الطلبات المدفوعة", "📦 Paid orders"),
+    ("cmd_shipped", "🚚 تم الشحن (رقم)", "🚚 Mark shipped (number)"),
+    ("cmd_refund", "💸 استرجاع (رقم)", "💸 Refund (number)"),
+    ("cmd_help", "🛠 أوامر الأدمن", "🛠 Admin commands"),
+    ("cmd_bots", "🤖 البوتات المرتبطة", "🤖 Linked bots"),
+    ("cmd_delbot", "🗑 فصل بوت (ID)", "🗑 Unlink a bot (ID)"),
+    # رسالة بدء التشغيل
+    ("su_ok", "✅ البوت يعمل.\n", "✅ The bot is running.\n"),
+    ("su_pg", "🗄 قاعدة البيانات: PostgreSQL", "🗄 Database: PostgreSQL"),
+    ("su_sqlite", "🗄 قاعدة البيانات: SQLite ({path})", "🗄 Database: SQLite ({path})"),
+    ("su_warn",
+     "\n\n⚠️ الملف مؤقت: عند إعادة النشر قد تضيع المنتجات والبوتات المرتبطة. اربط Volume على /data وضع DB_PATH=/data/shop.db",
+     "\n\n⚠️ The file is temporary: products and linked bots may be lost on redeploy. Attach a Volume at /data and set DB_PATH=/data/shop.db"),
+    ("su_subs", "\n🤖 بوتات فرعية تعمل: {n}", "\n🤖 Sub-bots running: {n}"),
+    ("su_help", "\n\nاكتب /help لعرض الأوامر.", "\n\nSend /help to see the commands."),
+]
+
+STR = {"ar": {k: a for k, a, _ in _S}, "en": {k: e for k, _, e in _S}}
+
+# اللغة الحالية للتحديث الجاري
+_lang = ContextVar("lang", default=DEFAULT_LANG)
+
+
+def T(key, lang=None, **kw):
+    """نص مترجم حسب لغة المستخدم الحالي (أو لغة محددة)."""
+    lang = lang or _lang.get()
+    s = STR.get(lang, STR["ar"]).get(key) or STR["ar"][key]
+    return s.format(**kw)
+
+
+def wilaya_names(lang=None):
+    return WILAYAS_EN if (lang or _lang.get()) == "en" else WILAYAS
+
 
 # ───────────────────────── سياق المتجر (متعدد البوتات) ─────────────────────────
 TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
@@ -205,6 +458,14 @@ def init_db():
                 created_at BIGINT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shop_users (
+                shop_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                lang TEXT,
+                PRIMARY KEY (shop_id, user_id)
+            )
+        """)
 
     # ترحيل أعمدة الطلبات القديمة
     ensure_column("shop_orders", "product_id", "INT")
@@ -266,6 +527,37 @@ def get_setting(key, default=""):
         return r["value"] if r and r["value"] else default
     except Exception:
         return default
+
+
+# ── اللغة لكل مستخدم ──
+_LANG_CACHE = {}
+
+
+def get_lang(sid, uid):
+    k = (sid, uid)
+    if k in _LANG_CACHE:
+        return _LANG_CACHE[k]
+    lang = DEFAULT_LANG
+    try:
+        with cursor() as cur:
+            cur.execute("SELECT lang FROM shop_users WHERE shop_id=? AND user_id=?", (sid, uid))
+            r = cur.fetchone()
+        if r and r["lang"] in LANGS:
+            lang = r["lang"]
+    except Exception as e:
+        log.warning("get_lang failed: %s", e)
+    _LANG_CACHE[k] = lang
+    return lang
+
+
+def set_lang(sid, uid, lang):
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO shop_users (shop_id, user_id, lang) VALUES (?,?,?) "
+            "ON CONFLICT (shop_id, user_id) DO UPDATE SET lang=excluded.lang",
+            (sid, uid, lang),
+        )
+    _LANG_CACHE[(sid, uid)] = lang
 
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
@@ -471,50 +763,49 @@ def restock_one(pid):
                     (pid, shop_id()))
 
 
-# ───────────────────────── نصوص ─────────────────────────
+# ───────────────────────── نصوص مساعدة ─────────────────────────
 def esc(s):
     return html.escape(str(s or ""))
 
 
 def stock_label(stock):
-    return "غير محدود" if stock < 0 else str(stock)
+    return T("unlimited") if stock < 0 else str(stock)
 
 
-def order_text(o):
+def order_text(o, lang=None):
     name = o.get("product_name") or PRODUCT_NAME
     uname = f"@{esc(o['username'])}" if o.get("username") else "—"
     t = (
-        f"📦 <b>طلب #{o['id']}</b> — {esc(o['status'])}\n"
+        T("ot_head", lang, id=o["id"], status=esc(o["status"])) + "\n"
         f"🛍 {esc(name)}\n"
         f"👤 {esc(o['full_name'])} ({uname}) — ID: <code>{o['user_id']}</code>\n"
     )
     if o.get("wilaya"):
         t += f"📱 +{esc(o['phone'])}\n📍 {esc(o['wilaya'])}\n🏠 {esc(o['address'])}\n"
     else:
-        t += "💾 منتج رقمي\n"
+        t += T("ot_digital", lang) + "\n"
     if o.get("extra_value"):
-        t += f"🧩 {esc(o.get('extra_label') or 'حقل')}: <code>{esc(o['extra_value'])}</code>\n"
+        t += f"🧩 {esc(o.get('extra_label') or '—')}: <code>{esc(o['extra_value'])}</code>\n"
     t += f"💰 {o['amount']}⭐"
     return t
 
 
-UNAVAILABLE = {
-    "sold": "❌ للأسف، نفدت الكمية.",
-    "held": "⏳ القطعة محجوزة حالياً لزبون آخر (يدفع الآن). جرّب بعد عدة دقائق، فقد تعود متاحة.",
-}
-
-
 def wilaya_keyboard():
+    names = wilaya_names()
     rows, row = [], []
-    for i, name in enumerate(WILAYAS, start=1):
+    for i, name in enumerate(names, start=1):
         row.append(InlineKeyboardButton(f"{i:02d} {name}", callback_data=f"w_{i}"))
         if len(row) == 3:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel")])
+    rows.append([InlineKeyboardButton(T("btn_cancel"), callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
+
+
+def lang_button():
+    return [InlineKeyboardButton(T("btn_lang"), callback_data="lang_menu")]
 
 
 # ───────────────────────── واجهة الزبون ─────────────────────────
@@ -528,7 +819,8 @@ async def show_list(message, prods):
     for p in prods:
         mark = "❌ " if p["stock"] == 0 else ("🛠 " if p["shipping"] else "💾 ")
         rows.append([InlineKeyboardButton(f"{mark}{p['name'][:40]} — {p['price']}⭐", callback_data=f"prod_{p['id']}")])
-    await message.reply_text("🛍 <b>منتجاتنا</b>\n\nاختر منتجاً لعرض تفاصيله 👇", reply_markup=InlineKeyboardMarkup(rows))
+    rows.append(lang_button())
+    await message.reply_text(T("list_title"), reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def show_product(message, p, uid):
@@ -536,24 +828,25 @@ async def show_product(message, p, uid):
     text = f"{'🛠' if p['shipping'] else '💾'} <b>{esc(p['name'])}</b>\n\n"
     if p["description"]:
         text += f"{esc(p['description'])}\n\n"
-    text += f"💰 السعر: <b>{p['price']} ⭐</b> (نجوم تيليجرام)\n"
+    text += T("price_line", price=p["price"])
     if p["shipping"]:
         if p["stock"] >= 0:
-            text += f"📦 المتوفر: <b>{p['stock']}</b>\n"
-        text += "🇩🇿 البيع والتوصيل داخل الجزائر فقط\n"
+            text += T("stock_line", n=p["stock"])
+        text += T("dz_only")
     else:
-        text += "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n"
+        text += T("digital_note")
     text += "\n"
 
     rows = []
     if state == "available":
-        text += "اضغط الزر أدناه لإتمام الطلب 👇"
-        rows.append([InlineKeyboardButton("🛒 اشتري الآن", callback_data=f"buy_{p['id']}")])
+        text += T("buy_prompt")
+        rows.append([InlineKeyboardButton(T("btn_buy"), callback_data=f"buy_{p['id']}")])
     else:
-        text += UNAVAILABLE[state]
+        text += T("unavail_" + state)
     if len(list_products()) > 1:
-        rows.append([InlineKeyboardButton("🔙 كل المنتجات", callback_data="list")])
-    markup = InlineKeyboardMarkup(rows) if rows else None
+        rows.append([InlineKeyboardButton(T("btn_all_products"), callback_data="list")])
+    rows.append(lang_button())
+    markup = InlineKeyboardMarkup(rows)
 
     media = get_media(p["id"])[:MAX_PHOTOS]
     try:
@@ -574,21 +867,24 @@ async def show_product(message, p, uid):
     await message.reply_text(text, reply_markup=markup)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin = is_admin(update)
-    if admin:
-        await set_admin_commands(context.bot, shop_admin(), shop_id() == 0)
+async def send_home(message, uid):
     prods = list_products()
     if not prods:
-        msg = "🚧 لا توجد منتجات حالياً."
-        if admin:
-            msg += "\n\nأنت الأدمن: اكتب /addproduct لإضافة أول منتج."
-        await update.message.reply_text(msg)
-        return ConversationHandler.END
+        msg = T("no_products")
+        if shop_admin() and uid == shop_admin():
+            msg += T("admin_add_hint")
+        await message.reply_text(msg)
+        return
     if len(prods) == 1:
-        await show_product(update.message, prods[0], update.effective_user.id)
+        await show_product(message, prods[0], uid)
     else:
-        await show_list(update.message, prods)
+        await show_list(message, prods)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_admin(update):
+        await set_admin_commands(context.bot, shop_admin(), shop_id())
+    await send_home(update.message, update.effective_user.id)
     return ConversationHandler.END
 
 
@@ -597,7 +893,7 @@ async def prod_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     p = get_product(int(q.data.split("_")[1]))
     if not p or not p["active"]:
-        await q.message.reply_text("هذا المنتج لم يعد متوفراً.")
+        await q.message.reply_text(T("product_gone"))
         return
     await show_product(q.message, p, q.from_user.id)
 
@@ -610,30 +906,62 @@ async def list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_list(q.message, prods)
 
 
+# ── اللغة ──
+def lang_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇩🇿 العربية", callback_data="setlang_ar"),
+        InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en"),
+    ]])
+
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(T("lang_pick"), reply_markup=lang_keyboard())
+
+
+async def lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.data == "lang_menu":
+        await q.message.reply_text(T("lang_pick"), reply_markup=lang_keyboard())
+        return
+    lang = q.data.split("_")[1]
+    if lang not in LANGS:
+        return
+    set_lang(shop_id(), q.from_user.id, lang)
+    _lang.set(lang)
+    if is_admin(update):
+        await set_admin_commands(context.bot, shop_admin(), shop_id())
+    try:
+        await q.message.edit_text(T("lang_set"))
+    except Exception:
+        await q.message.reply_text(T("lang_set"))
+    await send_home(q.message, q.from_user.id)
+
+
 # ───────────────────────── خطوات الطلب ─────────────────────────
 async def send_summary(message, context):
     d = context.user_data
     p = get_product(d["pid"])
-    rows = [[InlineKeyboardButton(f"💳 تأكيد والدفع {p['price']}⭐", callback_data="pay")]]
+    rows = [[InlineKeyboardButton(T("btn_pay", price=p["price"]), callback_data="pay")]]
     if p["shipping"]:
-        rows.append([InlineKeyboardButton("✏️ تعديل الولاية/العنوان", callback_data="restart")])
-    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel")])
-    text = f"📋 <b>راجع طلبك:</b>\n\n🛍 {esc(p['name'])}\n"
+        rows.append([InlineKeyboardButton(T("btn_edit_addr"), callback_data="restart")])
+    rows.append([InlineKeyboardButton(T("btn_cancel"), callback_data="cancel")])
+    text = T("summary_title", name=esc(p["name"]))
     if p["shipping"]:
         text += f"📱 +{esc(d['phone'])}\n📍 {esc(d['wilaya'])}\n🏠 {esc(d['address'])}\n"
     else:
-        text += "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n"
+        text += T("digital_note")
     if p.get("extra_label") and d.get("extra"):
         text += f"🧩 {esc(p['extra_label'])}: <b>{esc(d['extra'])}</b>\n"
-    text += f"\n💰 المبلغ: <b>{p['price']}⭐</b>"
+    text += T("summary_amount", price=p["price"])
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def ask_extra_or_summary(message, context, p):
     """يسأل الزبون عن الحقل المخصص (إن وُجد ولم يُجب عنه) وإلا يعرض الملخص."""
     if p.get("extra_label") and "extra" not in context.user_data:
-        hint = "(أرسل أرقاماً فقط)" if p.get("extra_type") == "number" else "(أرسل نصاً)"
-        await message.reply_text(f"🧩 {esc(p['extra_label'])}\n{hint}\n\n(للإلغاء: /cancel)")
+        hint = T("extra_hint_num") if p.get("extra_type") == "number" else T("extra_hint_text")
+        await message.reply_text(f"🧩 {esc(p['extra_label'])}\n{hint}\n\n{T('cancel_hint')}")
         return EXTRA
     await send_summary(message, context)
     return CONFIRM
@@ -646,16 +974,16 @@ async def got_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
     p = get_product(d["pid"]) if d.get("pid") else None
     if not p or not p.get("extra_label"):
-        await update.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        await update.message.reply_text(T("session_expired"))
         return ConversationHandler.END
     t = update.message.text.strip()
     if p.get("extra_type") == "number":
         t = t.translate(AR_DIGITS).replace(" ", "")
         if not re.fullmatch(r"\d{1,30}", t):
-            await update.message.reply_text("⚠️ أرسل أرقاماً فقط (بدون حروف أو رموز).")
+            await update.message.reply_text(T("extra_bad_num"))
             return EXTRA
     elif not (1 <= len(t) <= 300):
-        await update.message.reply_text("⚠️ اكتب نصاً من 1 إلى 300 حرف.")
+        await update.message.reply_text(T("extra_bad_text"))
         return EXTRA
     d["extra"] = t
     await send_summary(update.message, context)
@@ -668,7 +996,7 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = int(q.data.split("_")[1])
     state = availability(pid, q.from_user.id)
     if state != "available":
-        await q.message.reply_text(UNAVAILABLE[state])
+        await q.message.reply_text(T("unavail_" + state))
         return ConversationHandler.END
     p = get_product(pid)
     context.user_data.clear()
@@ -678,37 +1006,30 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await ask_extra_or_summary(q.message, context, p)
 
     kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 مشاركة رقم هاتفي", request_contact=True)]],
+        [[KeyboardButton(T("btn_share_phone"), request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True,
     )
-    await q.message.reply_text(
-        "🇩🇿 للتأكد أنك من الجزائر، شارك رقم هاتفك بالضغط على الزر أدناه.\n"
-        "(يجب أن يكون الرقم جزائري +213 ومرتبط بحسابك)",
-        reply_markup=kb,
-    )
+    await q.message.reply_text(T("phone_ask"), reply_markup=kb)
     return PHONE
 
 
 async def got_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = update.message.contact
     if c.user_id != update.effective_user.id:
-        await update.message.reply_text("⚠️ يرجى مشاركة رقمك أنت، وليس رقم شخص آخر.")
+        await update.message.reply_text(T("phone_not_yours"))
         return PHONE
     phone = "".join(ch for ch in c.phone_number if ch.isdigit())
     if not (phone.startswith("213") and len(phone) == 12):
-        await update.message.reply_text(
-            "🚫 عذراً، البيع متاح فقط لأصحاب أرقام الهاتف الجزائرية (+213).",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await update.message.reply_text(T("phone_not_dz"), reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
     context.user_data["phone"] = phone
-    await update.message.reply_text("✅ تم التحقق من رقمك.", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text("📍 اختر ولايتك:", reply_markup=wilaya_keyboard())
+    await update.message.reply_text(T("phone_ok"), reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(T("pick_wilaya"), reply_markup=wilaya_keyboard())
     return WILAYA
 
 
 async def phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("اضغط على زر «📱 مشاركة رقم هاتفي» أسفل الشاشة، أو /cancel للإلغاء.")
+    await update.message.reply_text(T("phone_hint"))
     return PHONE
 
 
@@ -716,24 +1037,21 @@ async def got_wilaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     idx = int(q.data.split("_")[1])
-    context.user_data["wilaya"] = f"{idx:02d} - {WILAYAS[idx - 1]}"
-    await q.message.edit_text(
-        f"📍 الولاية: <b>{esc(WILAYAS[idx - 1])}</b>\n\n"
-        "🏠 الآن اكتب عنوانك الكامل للتوصيل:\n"
-        "البلدية، الحي، الشارع، رقم المنزل، وأي علامة مميزة."
-    )
+    # نخزّن الاسمين (عربي / English) ليقرأها الأدمن بأي لغة
+    context.user_data["wilaya"] = f"{idx:02d} - {WILAYAS[idx - 1]} / {WILAYAS_EN[idx - 1]}"
+    await q.message.edit_text(T("wilaya_chosen", w=esc(wilaya_names()[idx - 1])))
     return ADDRESS
 
 
 async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     addr = update.message.text.strip()
     if len(addr) < 10 or len(addr) > 300:
-        await update.message.reply_text("⚠️ العنوان قصير جداً أو طويل جداً. اكتب عنواناً واضحاً (10 – 300 حرف).")
+        await update.message.reply_text(T("addr_bad"))
         return ADDRESS
     context.user_data["address"] = addr
     p = get_product(context.user_data.get("pid") or 0)
     if not p:
-        await update.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        await update.message.reply_text(T("session_expired"))
         return ConversationHandler.END
     return await ask_extra_or_summary(update.message, context, p)
 
@@ -741,7 +1059,7 @@ async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restart_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.message.reply_text("📍 اختر ولايتك:", reply_markup=wilaya_keyboard())
+    await q.message.reply_text(T("pick_wilaya"), reply_markup=wilaya_keyboard())
     return WILAYA
 
 
@@ -752,26 +1070,25 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = d.get("pid")
     p = get_product(pid) if pid else None
     if not p:
-        await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        await q.message.reply_text(T("session_expired"))
         return ConversationHandler.END
     if p["shipping"] and not all(k in d for k in ("phone", "wilaya", "address")):
-        await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        await q.message.reply_text(T("session_expired"))
         return ConversationHandler.END
-
     if p.get("extra_label") and not d.get("extra"):
-        await q.message.reply_text("انتهت الجلسة، اكتب /start للبدء من جديد.")
+        await q.message.reply_text(T("session_expired"))
         return ConversationHandler.END
 
     oid, why = place_order(q.from_user, pid, d.get("phone"), d.get("wilaya"), d.get("address"), d.get("extra"))
     if not oid:
-        await q.message.reply_text(UNAVAILABLE.get(why, UNAVAILABLE["sold"]))
+        await q.message.reply_text(T("unavail_" + (why if why in ("sold", "held") else "sold")))
         return ConversationHandler.END
     order = get_order(oid)
 
-    await q.message.reply_text(f"⏳ تم حجز طلبك لمدة {RESERVE_MINUTES} دقائق. أكمل الدفع من الفاتورة أدناه 👇")
+    await q.message.reply_text(T("reserved", m=RESERVE_MINUTES))
     desc = (p["description"] or p["name"])
     if p["shipping"]:
-        desc = f"{p['name']} — توصيل داخل الجزائر"
+        desc = T("invoice_ship_desc", name=p["name"])
     await context.bot.send_invoice(
         chat_id=q.message.chat_id,
         title=p["name"][:32],
@@ -788,9 +1105,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text("تم إلغاء الطلب. اكتب /start للبدء من جديد.", reply_markup=ReplyKeyboardRemove())
+        await update.callback_query.message.reply_text(T("cancelled"), reply_markup=ReplyKeyboardRemove())
     else:
-        await update.message.reply_text("تم إلغاء الطلب. اكتب /start للبدء من جديد.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(T("cancelled"), reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 
@@ -809,13 +1126,15 @@ async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if o is not None and q.total_amount == o["amount"]:
         await q.answer(ok=True)
     else:
-        await q.answer(ok=False, error_message="عذراً، المنتج لم يعد متاحاً أو انتهت مهلة الحجز.")
+        await q.answer(ok=False, error_message=T("precheck_fail"))
 
 
-async def notify_admin(context, text):
+async def notify_admin(context, build):
+    """build: دالة تأخذ لغة الأدمن وتُرجع النص (فتصل الرسالة بلغة الأدمن لا الزبون)."""
     a = shop_admin()
     if a:
         try:
+            text = build(get_lang(shop_id(), a))
             await context.bot.send_message(a, text)
         except Exception as e:
             log.error("admin notify failed: %s", e)
@@ -825,7 +1144,7 @@ async def deliver_digital(context, chat_id, p):
     """يرسل المحتوى الرقمي للزبون. يرجع True إذا أُرسل شيء."""
     sent = False
     if p.get("delivery_text"):
-        await context.bot.send_message(chat_id, f"🎁 <b>منتجك:</b>\n\n{esc(p['delivery_text'])}")
+        await context.bot.send_message(chat_id, T("your_product", text=esc(p["delivery_text"])))
         sent = True
     if p.get("delivery_file"):
         await context.bot.send_document(chat_id, p["delivery_file"])
@@ -843,21 +1162,18 @@ async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status == "ok":
         p = get_product(order["product_id"]) if order.get("product_id") else None
         if p and not p["shipping"]:
-            await update.message.reply_text(f"✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>")
+            await update.message.reply_text(T("paid_ok_digital", oid=oid))
             ok = False
             try:
                 ok = await deliver_digital(context, update.effective_chat.id, p)
             except Exception as e:
                 log.error("digital delivery failed: %s", e)
             if not ok:
-                await update.message.reply_text("سيصلك المنتج من المشرف قريباً 🙏")
-                await notify_admin(context, f"⚠️ طلب رقمي #{oid} بلا محتوى تسليم! أرسله للزبون يدوياً (ID: <code>{uid}</code>).")
+                await update.message.reply_text(T("will_send"))
+                await notify_admin(context, lambda L: T("adm_digital_nodeliv", L, oid=oid, uid=uid))
         else:
-            await update.message.reply_text(
-                f"✅ <b>تم الدفع بنجاح!</b>\n\nرقم طلبك: <b>#{oid}</b>\n"
-                "سنتواصل معك على رقمك لتأكيد التوصيل قريباً. شكراً لثقتك 🙏"
-            )
-        await notify_admin(context, "🔔 <b>طلب مدفوع جديد!</b>\n\n" + order_text(order))
+            await update.message.reply_text(T("paid_ok_ship", oid=oid))
+        await notify_admin(context, lambda L: T("adm_new_paid", L) + order_text(order, L))
     elif status == "dup":
         return
     else:
@@ -865,14 +1181,14 @@ async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.refund_star_payment(user_id=uid, telegram_payment_charge_id=charge)
             if oid:
                 set_order(oid, "refunded", charge)
-            await update.message.reply_text("⚠️ نعتذر، المنتج بيع للتو. تم استرجاع نجومك بالكامل ✅")
-            await notify_admin(context, f"⚠️ دفع متأخر للطلب #{oid} (نفدت الكمية) — تم الاسترجاع تلقائياً.")
+            await update.message.reply_text(T("refunded_soldout"))
+            await notify_admin(context, lambda L: T("adm_late", L, oid=oid))
         except Exception as e:
             log.error("auto refund failed: %s", e)
-            await update.message.reply_text("⚠️ حدثت مشكلة، سيتواصل معك المشرف لاسترجاع نجومك.")
+            await update.message.reply_text(T("refund_problem"))
             await notify_admin(
                 context,
-                f"🚨 <b>يلزم استرجاع يدوي</b>\nالمستخدم: <code>{uid}</code>\ncharge_id: <code>{esc(charge)}</code>\nالخطأ: {esc(e)}",
+                lambda L: T("adm_manual_refund", L, uid=uid, charge=esc(charge), err=esc(e)),
             )
 
 
@@ -885,20 +1201,17 @@ def panel_text(p):
     n = len(get_photos(p["id"]))
     t = (
         f"🗂 <b>{esc(p['name'])}</b>  (#{p['id']})\n\n"
-        f"النوع: {'🚚 مادي (شحن + ولايات)' if p['shipping'] else '💾 رقمي (بدون شحن)'}\n"
-        f"💰 السعر: {p['price']}⭐\n"
-        f"📦 المخزون: {stock_label(p['stock'])}\n"
-        f"📷 الوسائط (صور/فيديو): {n}\n"
-        f"الحالة: {'✅ ظاهر للزبائن' if p['active'] else '🚫 مخفي'}\n"
+        f"{T('pt_type_ship') if p['shipping'] else T('pt_type_dig')}\n"
+        f"{T('pt_price', p=p['price'])}\n"
+        f"{T('pt_stock', s=stock_label(p['stock']))}\n"
+        f"{T('pt_media', n=n)}\n"
+        f"{T('pt_visible') if p['active'] else T('pt_hidden')}\n"
     )
     if p.get("extra_label"):
-        kind = "🔢 رقم" if p.get("extra_type") == "number" else "🔤 نص"
-        t += f"🧩 حقل الزبون: {esc(p['extra_label'])} ({kind})\n"
+        kind = T("kind_num") if p.get("extra_type") == "number" else T("kind_text")
+        t += T("pt_extra", label=esc(p["extra_label"]), kind=kind) + "\n"
     if not p["shipping"]:
-        t += (
-            f"🎁 محتوى التسليم: نص {'✅' if p['delivery_text'] else '❌'} | "
-            f"ملف {'✅' if p['delivery_file'] else '❌'}\n"
-        )
+        t += T("pt_deliv", a="✅" if p["delivery_text"] else "❌", b="✅" if p["delivery_file"] else "❌") + "\n"
     if p["description"]:
         t += f"\n📝 {esc(p['description'][:200])}"
     return t
@@ -906,29 +1219,29 @@ def panel_text(p):
 
 def panel_markup(p):
     i = p["id"]
+    B = InlineKeyboardButton
     rows = [
-        [InlineKeyboardButton("✏️ الاسم", callback_data=f"edt_name_{i}"),
-         InlineKeyboardButton("📝 الوصف", callback_data=f"edt_desc_{i}")],
-        [InlineKeyboardButton("💰 السعر", callback_data=f"edt_price_{i}"),
-         InlineKeyboardButton("📊 المخزون", callback_data=f"edt_stock_{i}")],
-        [InlineKeyboardButton("📷 تغيير الصور/الفيديو", callback_data=f"edt_photos_{i}"),
-         InlineKeyboardButton("🧹 مسح الوسائط", callback_data=f"adm_clrphotos_{i}")],
-        [InlineKeyboardButton("🔁 تحويل إلى رقمي" if p["shipping"] else "🔁 تحويل إلى مادي (شحن)",
-                              callback_data=f"adm_ship_{i}")],
+        [B(T("b_name"), callback_data=f"edt_name_{i}"),
+         B(T("b_desc"), callback_data=f"edt_desc_{i}")],
+        [B(T("b_price"), callback_data=f"edt_price_{i}"),
+         B(T("b_stock"), callback_data=f"edt_stock_{i}")],
+        [B(T("b_photos"), callback_data=f"edt_photos_{i}"),
+         B(T("b_clr"), callback_data=f"adm_clrphotos_{i}")],
+        [B(T("b_to_dig") if p["shipping"] else T("b_to_phys"), callback_data=f"adm_ship_{i}")],
     ]
     if not p["shipping"]:
-        rows.append([InlineKeyboardButton("🎁 محتوى التسليم", callback_data=f"edt_deliv_{i}")])
-    rows.append([InlineKeyboardButton("🧩 حقل يرسله الزبون", callback_data=f"edt_extra_{i}")])
-    rows.append([InlineKeyboardButton("🚫 إخفاء" if p["active"] else "✅ إظهار", callback_data=f"adm_active_{i}"),
-                 InlineKeyboardButton("❌ حذف", callback_data=f"adm_del_{i}")])
-    rows.append([InlineKeyboardButton("🔙 المنتجات", callback_data="adm_list")])
+        rows.append([B(T("b_deliv"), callback_data=f"edt_deliv_{i}")])
+    rows.append([B(T("b_extra"), callback_data=f"edt_extra_{i}")])
+    rows.append([B(T("b_hide") if p["active"] else T("b_show"), callback_data=f"adm_active_{i}"),
+                 B(T("b_del"), callback_data=f"adm_del_{i}")])
+    rows.append([B(T("b_back"), callback_data="adm_list")])
     return InlineKeyboardMarkup(rows)
 
 
 async def render_panel(message, pid, edit=False):
     p = get_product(pid)
     if not p:
-        await message.reply_text("المنتج غير موجود.")
+        await message.reply_text(T("not_found"))
         return
     if edit:
         try:
@@ -944,8 +1257,8 @@ async def send_products_admin(message):
     rows = [[InlineKeyboardButton(
         f"{'✅' if p['active'] else '🚫'} {'🛠' if p['shipping'] else '💾'} {p['name'][:30]} — {p['price']}⭐",
         callback_data=f"adm_panel_{p['id']}")] for p in prods]
-    rows.append([InlineKeyboardButton("➕ إضافة منتج", callback_data="adm_new")])
-    await message.reply_text("🗂 <b>المنتجات</b>\nاختر منتجاً لإدارته:", reply_markup=InlineKeyboardMarkup(rows))
+    rows.append([InlineKeyboardButton(T("b_add"), callback_data="adm_new")])
+    await message.reply_text(T("products_title"), reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -965,7 +1278,7 @@ async def adm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, pid = parts[1], int(parts[2])
     p = get_product(pid)
     if not p:
-        await q.message.reply_text("المنتج غير موجود.")
+        await q.message.reply_text(T("not_found"))
         return
 
     if action == "panel":
@@ -987,13 +1300,13 @@ async def adm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await render_panel(q.message, pid, edit=True)
     elif action == "del":
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ نعم، احذف", callback_data=f"adm_delyes_{pid}"),
-            InlineKeyboardButton("🔙 لا", callback_data=f"adm_panel_{pid}"),
+            InlineKeyboardButton(T("b_yes_del"), callback_data=f"adm_delyes_{pid}"),
+            InlineKeyboardButton(T("b_no"), callback_data=f"adm_panel_{pid}"),
         ]])
-        await q.message.reply_text(f"⚠️ حذف «{esc(p['name'])}» نهائياً؟", reply_markup=kb)
+        await q.message.reply_text(T("del_ask", name=esc(p["name"])), reply_markup=kb)
     elif action == "delyes":
         delete_product(pid)
-        await q.message.edit_text("🗑 تم حذف المنتج.")
+        await q.message.edit_text(T("deleted"))
 
 
 async def adm_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1006,7 +1319,7 @@ async def adm_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── إضافة منتج (محادثة) ──
 async def begin_new(message, context):
     context.user_data["adm"] = {"mode": "new"}
-    await message.reply_text("➕ <b>منتج جديد</b>\n\nاكتب <b>اسم المنتج</b>:\n(للإلغاء: /cancel)")
+    await message.reply_text(T("new_title"))
     return A_NAME
 
 
@@ -1027,24 +1340,24 @@ async def new_product_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     if len(name) < 2 or len(name) > 100:
-        await update.message.reply_text("⚠️ اكتب اسماً من 2 إلى 100 حرف.")
+        await update.message.reply_text(T("bad_name"))
         return A_NAME
     adm(context)["name"] = name
-    await update.message.reply_text("💰 اكتب <b>السعر</b> بالنجوم ⭐ (رقم فقط):")
+    await update.message.reply_text(T("ask_price"))
     return A_PRICE
 
 
 async def got_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = update.message.text.strip()
     if not t.isdigit() or not (1 <= int(t) <= 1000000):
-        await update.message.reply_text("⚠️ اكتب رقماً صحيحاً أكبر من 0.")
+        await update.message.reply_text(T("bad_price"))
         return A_PRICE
     adm(context)["price"] = int(t)
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚚 مادي — مع شحن (ولايات + عنوان)", callback_data="nt_ship")],
-        [InlineKeyboardButton("💾 رقمي — بدون شحن", callback_data="nt_dig")],
+        [InlineKeyboardButton(T("b_t_ship"), callback_data="nt_ship")],
+        [InlineKeyboardButton(T("b_t_dig"), callback_data="nt_dig")],
     ])
-    await update.message.reply_text("اختر <b>نوع المنتج</b>:", reply_markup=kb)
+    await update.message.reply_text(T("pick_type"), reply_markup=kb)
     return A_TYPE
 
 
@@ -1054,9 +1367,9 @@ async def got_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ship = 1 if q.data == "nt_ship" else 0
     adm(context)["shipping"] = ship
     if ship:
-        await q.message.reply_text("📦 اكتب <b>الكمية المتوفرة</b> (رقم):")
+        await q.message.reply_text(T("ask_stock_ship"))
     else:
-        await q.message.reply_text("📦 اكتب عدد النسخ المتاحة، أو <b>0</b> لعدد غير محدود:")
+        await q.message.reply_text(T("ask_stock_dig"))
     return A_STOCK
 
 
@@ -1073,20 +1386,17 @@ def parse_stock(text, shipping):
 async def got_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n = parse_stock(update.message.text, adm(context)["shipping"])
     if n is None:
-        await update.message.reply_text("⚠️ اكتب رقماً صحيحاً.")
+        await update.message.reply_text(T("bad_int"))
         return A_STOCK
     adm(context)["stock"] = n
-    await update.message.reply_text("📝 اكتب <b>وصف المنتج</b> (أو /skip للتخطي):")
+    await update.message.reply_text(T("ask_desc"))
     return A_DESC
 
 
 async def create_draft(update, context, desc):
     a = adm(context)
     a["pid"] = add_product(a["name"], desc, a["price"], a["stock"], a["shipping"], active=0)
-    await update.message.reply_text(
-        f"📷 أرسل <b>صور و/أو فيديوهات المنتج</b> (حتى {MAX_PHOTOS} في المجموع، كصور/فيديو وليس كملفات).\n"
-        "عند الانتهاء اكتب /done — أو /skip إذا لا تريد وسائط."
-    )
+    await update.message.reply_text(T("ask_media", n=MAX_PHOTOS))
     return A_PHOTOS
 
 
@@ -1105,20 +1415,20 @@ async def got_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_photos(pid)
     n = len(get_photos(pid))
     if n >= MAX_PHOTOS:
-        await update.message.reply_text(f"⚠️ الحد الأقصى {MAX_PHOTOS} صور. اكتب /done للمتابعة.")
+        await update.message.reply_text(T("media_max", n=MAX_PHOTOS))
         return A_PHOTOS
     if update.message.video:
         add_photo(pid, update.message.video.file_id, "video")
-        what = "الفيديو"
+        what = T("what_video")
     else:
         add_photo(pid, update.message.photo[-1].file_id, "photo")
-        what = "الصورة"
-    await update.message.reply_text(f"✅ تمت إضافة {what} ({n + 1}/{MAX_PHOTOS}). أرسل غيرها أو اكتب /done.")
+        what = T("what_photo")
+    await update.message.reply_text(T("media_added", what=what, i=n + 1, n=MAX_PHOTOS))
     return A_PHOTOS
 
 
 async def photos_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ أرسل صورة أو فيديو (وليس كملف)، أو /done للمتابعة.")
+    await update.message.reply_text(T("media_wrong"))
     return A_PHOTOS
 
 
@@ -1127,7 +1437,7 @@ async def finish_admin(update, context):
     pid = a.get("pid")
     if a.get("mode") == "new" and pid:
         update_product(pid, active=1)
-        await update.effective_message.reply_text("✅ تم حفظ المنتج ونشره.")
+        await update.effective_message.reply_text(T("saved_published"))
     context.user_data.pop("adm", None)
     if pid:
         await render_panel(update.effective_message, pid)
@@ -1135,12 +1445,7 @@ async def finish_admin(update, context):
 
 
 async def ask_delivery(message):
-    await message.reply_text(
-        "🎁 أرسل <b>ما سيستلمه الزبون بعد الدفع</b>:\n"
-        "• نص (رابط / كود / تعليمات) — آخر نص يستبدل السابق\n"
-        "• و/أو ملف (أرسله كـ Document)\n\n"
-        "عند الانتهاء اكتب /done."
-    )
+    await message.reply_text(T("ask_delivery"))
 
 
 async def photos_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1154,13 +1459,13 @@ async def photos_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def got_deliv_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_product(adm(context)["pid"], delivery_text=update.message.text.strip()[:3000])
-    await update.message.reply_text("✅ تم حفظ النص. أرسل ملفاً أيضاً أو اكتب /done.")
+    await update.message.reply_text(T("deliv_text_saved"))
     return A_DELIV
 
 
 async def got_deliv_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_product(adm(context)["pid"], delivery_file=update.message.document.file_id)
-    await update.message.reply_text("✅ تم حفظ الملف. أرسل نصاً أيضاً أو اكتب /done.")
+    await update.message.reply_text(T("deliv_file_saved"))
     return A_DELIV
 
 
@@ -1169,14 +1474,6 @@ async def deliv_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── تعديل منتج (دخول من الأزرار) ──
-EDIT_PROMPTS = {
-    "name": "✏️ اكتب الاسم الجديد:",
-    "desc": "📝 اكتب الوصف الجديد (أو - لمسحه):",
-    "price": "💰 اكتب السعر الجديد بالنجوم:",
-    "stock": "📦 اكتب المخزون الجديد (للمنتج الرقمي: 0 = غير محدود):",
-}
-
-
 async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -1185,27 +1482,21 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, field, pid = q.data.split("_")
     pid = int(pid)
     if not get_product(pid):
-        await q.message.reply_text("المنتج غير موجود.")
+        await q.message.reply_text(T("not_found"))
         return ConversationHandler.END
     context.user_data["adm"] = {"mode": "edit", "pid": pid, "field": field}
 
     if field == "photos":
         context.user_data["adm"]["replace"] = True
-        await q.message.reply_text(
-            f"📷 أرسل الصور/الفيديوهات الجديدة (حتى {MAX_PHOTOS}) — ستستبدل القديمة.\nعند الانتهاء: /done  |  للإبقاء على القديمة: /skip"
-        )
+        await q.message.reply_text(T("photos_replace", n=MAX_PHOTOS))
         return A_PHOTOS
     if field == "deliv":
         await ask_delivery(q.message)
         return A_DELIV
     if field == "extra":
-        await q.message.reply_text(
-            "🧩 اكتب <b>السؤال/الطلب الذي سيظهر للزبون</b> قبل الدفع.\n"
-            "مثال: <i>أرسل رقم حسابك (ID)</i> أو <i>اكتب اسم اللاعب</i>\n\n"
-            "أرسل <b>-</b> لحذف الحقل.\n(للإلغاء: /cancel)"
-        )
+        await q.message.reply_text(T("x_ask"))
         return X_LABEL
-    await q.message.reply_text(EDIT_PROMPTS[field] + "\n(للإلغاء: /cancel)")
+    await q.message.reply_text(T("ep_" + field) + "\n" + T("cancel_hint"))
     return E_VALUE
 
 
@@ -1214,31 +1505,31 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid, field = a["pid"], a["field"]
     p = get_product(pid)
     if not p:
-        await update.message.reply_text("المنتج غير موجود.")
+        await update.message.reply_text(T("not_found"))
         return ConversationHandler.END
     t = update.message.text.strip()
 
     if field == "name":
         if not (2 <= len(t) <= 100):
-            await update.message.reply_text("⚠️ اكتب اسماً من 2 إلى 100 حرف.")
+            await update.message.reply_text(T("bad_name"))
             return E_VALUE
         update_product(pid, name=t)
     elif field == "desc":
         update_product(pid, description="" if t == "-" else t[:700])
     elif field == "price":
         if not t.isdigit() or not (1 <= int(t) <= 1000000):
-            await update.message.reply_text("⚠️ اكتب رقماً صحيحاً أكبر من 0.")
+            await update.message.reply_text(T("bad_price"))
             return E_VALUE
         update_product(pid, price=int(t))
     elif field == "stock":
         n = parse_stock(t, p["shipping"])
         if n is None:
-            await update.message.reply_text("⚠️ اكتب رقماً صحيحاً.")
+            await update.message.reply_text(T("bad_int"))
             return E_VALUE
         update_product(pid, stock=n)
 
     context.user_data.pop("adm", None)
-    await update.message.reply_text("✅ تم التحديث.")
+    await update.message.reply_text(T("updated"))
     await render_panel(update.message, pid)
     return ConversationHandler.END
 
@@ -1247,21 +1538,21 @@ async def got_x_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = adm(context)
     t = update.message.text.strip()
     if t == "-":
-        update_product(a["pid"], extra_label=None, extra_type=None)
         pid = a["pid"]
+        update_product(pid, extra_label=None, extra_type=None)
         context.user_data.pop("adm", None)
-        await update.message.reply_text("🗑 تم حذف الحقل.")
+        await update.message.reply_text(T("x_removed"))
         await render_panel(update.message, pid)
         return ConversationHandler.END
     if not (2 <= len(t) <= 200):
-        await update.message.reply_text("⚠️ اكتب نصاً من 2 إلى 200 حرف.")
+        await update.message.reply_text(T("x_bad_len"))
         return X_LABEL
     a["xlabel"] = t
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔢 رقم فقط", callback_data="xt_num"),
-        InlineKeyboardButton("🔤 نص حر", callback_data="xt_text"),
+        InlineKeyboardButton(T("b_x_num"), callback_data="xt_num"),
+        InlineKeyboardButton(T("b_x_text"), callback_data="xt_text"),
     ]])
-    await update.message.reply_text("ما <b>نوع الإجابة</b> المطلوبة من الزبون؟", reply_markup=kb)
+    await update.message.reply_text(T("x_type_ask"), reply_markup=kb)
     return X_TYPE
 
 
@@ -1276,7 +1567,7 @@ async def got_x_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     update_product(pid, extra_label=a["xlabel"], extra_type="number" if q.data == "xt_num" else "text")
     context.user_data.pop("adm", None)
-    await q.message.reply_text("✅ تم حفظ الحقل. سيُطلب من الزبون قبل الدفع.")
+    await q.message.reply_text(T("x_saved"))
     await render_panel(q.message, pid)
     return ConversationHandler.END
 
@@ -1285,7 +1576,7 @@ async def adm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = context.user_data.pop("adm", {})
     if a.get("mode") == "new" and a.get("pid"):
         delete_product(a["pid"])  # مسودة غير مكتملة
-    await update.message.reply_text("تم الإلغاء.")
+    await update.message.reply_text(T("adm_cancelled"))
     return ConversationHandler.END
 
 
@@ -1295,7 +1586,7 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     orders = list_orders()
     if not orders:
-        await update.message.reply_text("لا توجد طلبات مدفوعة بعد.")
+        await update.message.reply_text(T("no_orders"))
         return
     for o in orders:
         await update.message.reply_text(order_text(o))
@@ -1305,17 +1596,19 @@ async def cmd_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("الاستعمال: <code>/shipped رقم_الطلب</code>")
+        await update.message.reply_text(T("shipped_usage"))
         return
     o = get_order(int(context.args[0]))
     if not o or o["status"] != "paid":
-        await update.message.reply_text("الطلب غير موجود أو غير مدفوع.")
+        await update.message.reply_text(T("shipped_bad"))
         return
     set_order(o["id"], "shipped")
-    await update.message.reply_text(f"✅ الطلب #{o['id']} أصبح «تم الشحن».")
+    await update.message.reply_text(T("shipped_ok", id=o["id"]))
     if o.get("wilaya"):
         try:
-            await context.bot.send_message(o["user_id"], f"🚚 طلبك #{o['id']} في الطريق إليك! سيتصل بك المُوصِّل قريباً.")
+            # رسالة الزبون بلغته هو
+            await context.bot.send_message(
+                o["user_id"], T("shipped_user", get_lang(shop_id(), o["user_id"]), id=o["id"]))
         except Exception:
             pass
 
@@ -1324,23 +1617,24 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("الاستعمال: <code>/refund رقم_الطلب</code>")
+        await update.message.reply_text(T("refund_usage"))
         return
     o = get_order(int(context.args[0]))
     if not o or o["status"] not in ("paid", "shipped") or not o["charge_id"]:
-        await update.message.reply_text("لا يمكن استرجاع هذا الطلب.")
+        await update.message.reply_text(T("refund_bad"))
         return
     try:
         await context.bot.refund_star_payment(user_id=o["user_id"], telegram_payment_charge_id=o["charge_id"])
     except Exception as e:
-        await update.message.reply_text(f"فشل الاسترجاع: {esc(e)}")
+        await update.message.reply_text(T("refund_fail", err=esc(e)))
         return
     if o["status"] == "paid" and o.get("product_id"):
         restock_one(o["product_id"])
     set_order(o["id"], "refunded")
-    await update.message.reply_text(f"💸 تم استرجاع {o['amount']}⭐ للطلب #{o['id']}.")
+    await update.message.reply_text(T("refund_ok", amount=o["amount"], id=o["id"]))
     try:
-        await context.bot.send_message(o["user_id"], f"💸 تم استرجاع نجوم الطلب #{o['id']} إلى حسابك.")
+        await context.bot.send_message(
+            o["user_id"], T("refunded_user", get_lang(shop_id(), o["user_id"]), id=o["id"]))
     except Exception:
         pass
 
@@ -1348,21 +1642,9 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    t = (
-        "🛠 <b>أوامر الأدمن</b>\n\n"
-        "/addproduct — إضافة منتج جديد\n"
-        "/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، إخفاء، حذف)\n"
-        "/orders — الطلبات المدفوعة\n"
-        "/shipped رقم — تم الشحن\n"
-        "/refund رقم — استرجاع النجوم"
-    )
+    t = T("help_admin")
     if shop_id() == 0:
-        t += (
-            "\n\n🤖 <b>البوتات المتعددة</b>\n"
-            "أرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n"
-            "/bots — البوتات المرتبطة\n"
-            "/delbot ID — فصل بوت وإيقافه"
-        )
+        t += T("help_multi")
     await update.message.reply_text(t)
 
 
@@ -1380,13 +1662,13 @@ async def got_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
 
     if token == BOT_TOKEN:
-        await context.bot.send_message(chat, "⚠️ هذا توكن البوت الرئيسي نفسه.")
+        await context.bot.send_message(chat, T("tok_main"))
         return
     try:
         async with Bot(token) as b:
             me = await b.get_me()
     except Exception as e:
-        await context.bot.send_message(chat, f"❌ التوكن غير صالح: {esc(str(e)[:150])}")
+        await context.bot.send_message(chat, T("tok_invalid", err=esc(str(e)[:150])))
         return
 
     owner = update.effective_user.id
@@ -1410,17 +1692,10 @@ async def got_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_shop(token, {"id": me.id, "admin": owner, "username": me.username})
     except Exception as e:
         log.error("start shop failed: %s", e)
-        await context.bot.send_message(chat, f"❌ تعذّر تشغيل البوت: {esc(str(e)[:200])}")
+        await context.bot.send_message(chat, T("tok_fail", err=esc(str(e)[:200])))
         return
 
-    await context.bot.send_message(
-        chat,
-        f"✅ تم ربط وتشغيل البوت <b>@{esc(me.username)}</b> (ID: <code>{me.id}</code>)\n\n"
-        f"🔗 افتحه: https://t.me/{esc(me.username)}\n"
-        "اضغط /start هناك — أنت أدمنه، ثم استعمل /addproduct لإضافة منتجاتك.\n\n"
-        "ℹ️ منتجاته وطلباته منفصلة تماماً عن هذا البوت.\n"
-        "🗑 لفصله لاحقاً: <code>/delbot " + str(me.id) + "</code>",
-    )
+    await context.bot.send_message(chat, T("tok_ok", u=esc(me.username), id=me.id))
 
 
 async def cmd_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1430,11 +1705,11 @@ async def cmd_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT * FROM shop_bots ORDER BY created_at")
         rows = cur.fetchall()
     if not rows:
-        await update.message.reply_text("لا توجد بوتات مرتبطة. أرسل توكن بوت لإضافته.")
+        await update.message.reply_text(T("bots_none"))
         return
-    t = "🤖 <b>البوتات المرتبطة</b>\n\n"
+    t = T("bots_title")
     for r in rows:
-        live = "🟢 يعمل" if r["bot_id"] in RUNNING else ("⚪ متوقف" if r["active"] else "🚫 مفصول")
+        live = T("st_run") if r["bot_id"] in RUNNING else (T("st_stop") if r["active"] else T("st_off"))
         t += f"{live} — @{esc(r['username'])} — ID: <code>{r['bot_id']}</code>\n"
     await update.message.reply_text(t)
 
@@ -1443,65 +1718,74 @@ async def cmd_delbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if shop_id() != 0 or not is_admin(update):
         return
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("الاستعمال: <code>/delbot ID_البوت</code> (انظر /bots)")
+        await update.message.reply_text(T("delbot_usage"))
         return
     bid = int(context.args[0])
     with cursor() as cur:
         cur.execute("SELECT * FROM shop_bots WHERE bot_id=?", (bid,))
         r = cur.fetchone()
     if not r:
-        await update.message.reply_text("لا يوجد بوت بهذا الـ ID.")
+        await update.message.reply_text(T("delbot_nf"))
         return
     await stop_shop(bid)
     with cursor() as cur:
         cur.execute("UPDATE shop_bots SET active=0 WHERE bot_id=?", (bid,))
-    await update.message.reply_text(
-        f"🗑 تم إيقاف وفصل @{esc(r['username'])}.\n"
-        "(بياناته محفوظة؛ إن أرسلت توكنه مجدداً يعود بمنتجاته.)"
-    )
+    await update.message.reply_text(T("delbot_ok", u=esc(r["username"])))
 
 
 async def bind_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعمل أولاً مع كل تحديث ويحدد أي متجر يخدمه."""
-    _shop.set(context.application.bot_data["shop"])
+    """يعمل أولاً مع كل تحديث: يحدد المتجر ولغة المستخدم."""
+    shop = context.application.bot_data["shop"]
+    _shop.set(shop)
+    u = update.effective_user
+    _lang.set(get_lang(shop["id"], u.id) if u else DEFAULT_LANG)
 
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled error", exc_info=context.error)
 
 
-ADMIN_COMMANDS = [
-    BotCommand("addproduct", "➕ إضافة منتج"),
-    BotCommand("products", "🗂 إدارة المنتجات"),
-    BotCommand("orders", "📦 الطلبات المدفوعة"),
-    BotCommand("shipped", "🚚 تم الشحن (رقم)"),
-    BotCommand("refund", "💸 استرجاع (رقم)"),
-    BotCommand("help", "🛠 أوامر الأدمن"),
-    BotCommand("start", "🏠 الصفحة الرئيسية"),
-]
+def admin_commands(lang, is_main):
+    cmds = [
+        BotCommand("addproduct", T("cmd_addproduct", lang)),
+        BotCommand("products", T("cmd_products", lang)),
+        BotCommand("orders", T("cmd_orders", lang)),
+        BotCommand("shipped", T("cmd_shipped", lang)),
+        BotCommand("refund", T("cmd_refund", lang)),
+        BotCommand("help", T("cmd_help", lang)),
+        BotCommand("lang", T("cmd_lang", lang)),
+        BotCommand("start", T("cmd_start", lang)),
+    ]
+    if is_main:
+        cmds += [
+            BotCommand("bots", T("cmd_bots", lang)),
+            BotCommand("delbot", T("cmd_delbot", lang)),
+        ]
+    return cmds
 
-MAIN_COMMANDS = [
-    BotCommand("bots", "🤖 البوتات المرتبطة"),
-    BotCommand("delbot", "🗑 فصل بوت (ID)"),
-]
 
-
-async def set_admin_commands(bot, admin_id, is_main=False):
+async def set_admin_commands(bot, admin_id, sid):
     if not admin_id:
         return
     try:
-        cmds = ADMIN_COMMANDS + (MAIN_COMMANDS if is_main else [])
-        await bot.set_my_commands(cmds, scope=BotCommandScopeChat(admin_id))
+        lang = get_lang(sid, admin_id)
+        await bot.set_my_commands(admin_commands(lang, sid == 0), scope=BotCommandScopeChat(admin_id))
     except Exception as e:
         log.warning("admin set_my_commands failed: %s", e)
 
 
-async def setup_commands(bot, admin_id, is_main=False):
+def user_commands(lang):
+    return [BotCommand("start", T("cmd_start", lang)), BotCommand("lang", T("cmd_lang", lang))]
+
+
+async def setup_commands(bot, admin_id, sid):
     try:
-        await bot.set_my_commands([BotCommand("start", "🏠 الصفحة الرئيسية")], scope=BotCommandScopeDefault())
+        await bot.set_my_commands(user_commands(DEFAULT_LANG), scope=BotCommandScopeDefault())
+        for lg in LANGS:
+            await bot.set_my_commands(user_commands(lg), scope=BotCommandScopeDefault(), language_code=lg)
     except Exception as e:
         log.warning("default set_my_commands failed: %s", e)
-    await set_admin_commands(bot, admin_id, is_main)
+    await set_admin_commands(bot, admin_id, sid)
 
 
 # ───────────────────────── تشغيل البوتات الفرعية ─────────────────────────
@@ -1511,7 +1795,7 @@ async def start_shop(token, shop):
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     RUNNING[shop["id"]] = app
-    await setup_commands(app.bot, shop["admin"], False)
+    await setup_commands(app.bot, shop["admin"], shop["id"])
     log.info("Shop bot @%s started", shop.get("username"))
 
 
@@ -1538,23 +1822,21 @@ async def load_shops():
 
 
 async def post_init(app: Application):
-    await setup_commands(app.bot, ADMIN_ID, True)
+    await setup_commands(app.bot, ADMIN_ID, 0)
     await load_shops()
     if not ADMIN_ID:
         return
-    msg = "✅ البوت يعمل.\n"
+    L = get_lang(0, ADMIN_ID)
+    msg = T("su_ok", L)
     if USE_PG:
-        msg += "🗄 قاعدة البيانات: PostgreSQL"
+        msg += T("su_pg", L)
     else:
-        msg += f"🗄 قاعدة البيانات: SQLite ({os.path.abspath(DB_PATH)})"
+        msg += T("su_sqlite", L, path=os.path.abspath(DB_PATH))
         if not os.path.abspath(DB_PATH).startswith("/data"):
-            msg += (
-                "\n\n⚠️ الملف مؤقت: عند إعادة النشر قد تضيع المنتجات والبوتات المرتبطة. "
-                "اربط Volume على /data وضع DB_PATH=/data/shop.db"
-            )
+            msg += T("su_warn", L)
     if RUNNING:
-        msg += f"\n🤖 بوتات فرعية تعمل: {len(RUNNING)}"
-    msg += "\n\nاكتب /help لعرض الأوامر."
+        msg += T("su_subs", L, n=len(RUNNING))
+    msg += T("su_help", L)
     try:
         await app.bot.send_message(ADMIN_ID, msg)
     except Exception as e:
@@ -1570,7 +1852,7 @@ async def post_shutdown(app: Application):
 def register_handlers(app: Application, is_main: bool):
     text_only = filters.TEXT & ~filters.COMMAND
 
-    # يحدد المتجر قبل أي handler آخر (group -1)
+    # يحدد المتجر واللغة قبل أي handler آخر (group -1)
     app.add_handler(TypeHandler(Update, bind_shop), group=-1)
 
     admin_conv = ConversationHandler(
@@ -1635,6 +1917,8 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(admin_conv)
     app.add_handler(conv)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^(lang_menu|setlang_(ar|en))$"))
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(list_cb, pattern=r"^list$"))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
