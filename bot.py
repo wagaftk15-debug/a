@@ -1,10 +1,12 @@
 import os
+import re
 import html
 import time
 import sqlite3
 import logging
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -13,11 +15,12 @@ from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, LabeledPrice,
     BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputMediaPhoto, InputMediaVideo,
+    Bot,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    ConversationHandler, PreCheckoutQueryHandler, ContextTypes, Defaults, filters,
+    ConversationHandler, PreCheckoutQueryHandler, ContextTypes, Defaults, TypeHandler, filters,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -52,6 +55,23 @@ WILAYAS = [
     "سوق أهراس", "تيبازة", "ميلة", "عين الدفلى", "النعامة", "عين تموشنت", "غرداية", "غليزان", "تيميمون",
     "برج باجي مختار", "أولاد جلال", "بني عباس", "عين صالح", "عين قزام", "تقرت", "جانت", "المغير", "المنيعة",
 ]
+
+# ───────────────────────── سياق المتجر (متعدد البوتات) ─────────────────────────
+TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
+
+# المتجر الحالي: id=0 هو البوت الرئيسي، وغيره id = bot_id للبوت الفرعي
+_shop = ContextVar("shop", default={"id": 0, "admin": ADMIN_ID, "username": None})
+
+
+def shop_id():
+    return _shop.get()["id"]
+
+
+def shop_admin():
+    return _shop.get()["admin"]
+
+
+RUNNING = {}  # bot_id -> Application (البوتات الفرعية فقط)
 
 # ───────────────────────── قاعدة البيانات ─────────────────────────
 USE_PG = False
@@ -175,12 +195,25 @@ def init_db():
                 value TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shop_bots (
+                bot_id BIGINT PRIMARY KEY,
+                token TEXT NOT NULL,
+                username TEXT,
+                owner_id BIGINT,
+                active INT NOT NULL DEFAULT 1,
+                created_at BIGINT
+            )
+        """)
 
     # ترحيل أعمدة الطلبات القديمة
     ensure_column("shop_orders", "product_id", "INT")
     ensure_column("shop_orders", "product_name", "TEXT")
     ensure_column("shop_orders", "reserved_until", "BIGINT")
     ensure_column("shop_photos", "kind", "TEXT DEFAULT 'photo'")
+    # الصفوف القديمة تأخذ 0 = البوت الرئيسي
+    ensure_column("shop_products", "shop_id", "BIGINT DEFAULT 0")
+    ensure_column("shop_orders", "shop_id", "BIGINT DEFAULT 0")
 
     if USE_PG:
         with cursor() as cur:
@@ -196,9 +229,9 @@ def init_db():
                         f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
                     )
 
-    # أول تشغيل: أنشئ منتجاً افتراضياً (من المنتج القديم إن وُجد)
+    # أول تشغيل: أنشئ منتجاً افتراضياً للبوت الرئيسي (من المنتج القديم إن وُجد)
     with cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS n FROM shop_products")
+        cur.execute("SELECT COUNT(*) AS n FROM shop_products WHERE shop_id=0")
         n = cur.fetchone()["n"]
     if n == 0:
         stock = 1
@@ -230,31 +263,31 @@ def get_setting(key, default=""):
         return default
 
 
-# ── المنتجات ──
+# ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
 PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active"}
 
 
 def add_product(name, desc, price, stock, shipping, active=1):
     with cursor() as cur:
         cur.execute("""
-            INSERT INTO shop_products (name, description, price, stock, shipping, active, created_at)
-            VALUES (?,?,?,?,?,?,?) RETURNING id
-        """, (name, desc or "", price, stock, shipping, active, int(time.time())))
+            INSERT INTO shop_products (name, description, price, stock, shipping, active, created_at, shop_id)
+            VALUES (?,?,?,?,?,?,?,?) RETURNING id
+        """, (name, desc or "", price, stock, shipping, active, int(time.time()), shop_id()))
         return cur.fetchone()["id"]
 
 
 def get_product(pid):
     with cursor() as cur:
-        cur.execute("SELECT * FROM shop_products WHERE id=?", (pid,))
+        cur.execute("SELECT * FROM shop_products WHERE id=? AND shop_id=?", (pid, shop_id()))
         return cur.fetchone()
 
 
 def list_products(only_active=True):
     with cursor() as cur:
         if only_active:
-            cur.execute("SELECT * FROM shop_products WHERE active=1 ORDER BY id")
+            cur.execute("SELECT * FROM shop_products WHERE shop_id=? AND active=1 ORDER BY id", (shop_id(),))
         else:
-            cur.execute("SELECT * FROM shop_products ORDER BY id")
+            cur.execute("SELECT * FROM shop_products WHERE shop_id=? ORDER BY id", (shop_id(),))
         return cur.fetchall()
 
 
@@ -264,13 +297,16 @@ def update_product(pid, **fields):
         return
     sets = ", ".join(f"{k}=?" for k in fields)
     with cursor() as cur:
-        cur.execute(f"UPDATE shop_products SET {sets} WHERE id=?", (*fields.values(), pid))
+        cur.execute(f"UPDATE shop_products SET {sets} WHERE id=? AND shop_id=?", (*fields.values(), pid, shop_id()))
 
 
 def delete_product(pid):
     with cursor() as cur:
-        cur.execute("DELETE FROM shop_photos WHERE product_id=?", (pid,))
-        cur.execute("DELETE FROM shop_products WHERE id=?", (pid,))
+        cur.execute(
+            "DELETE FROM shop_photos WHERE product_id IN (SELECT id FROM shop_products WHERE id=? AND shop_id=?)",
+            (pid, shop_id()),
+        )
+        cur.execute("DELETE FROM shop_products WHERE id=? AND shop_id=?", (pid, shop_id()))
 
 
 def get_photos(pid):
@@ -306,7 +342,8 @@ def _held_by_others(cur, pid, uid):
 
 
 def _lock_product(cur, pid):
-    cur.execute("SELECT * FROM shop_products WHERE id=?" + (" FOR UPDATE" if USE_PG else ""), (pid,))
+    cur.execute("SELECT * FROM shop_products WHERE id=? AND shop_id=?" + (" FOR UPDATE" if USE_PG else ""),
+                (pid, shop_id()))
     return cur.fetchone()
 
 
@@ -338,17 +375,17 @@ def place_order(user, pid, phone, wilaya, address):
         cur.execute("""
             INSERT INTO shop_orders
               (user_id, username, full_name, phone, wilaya, address, amount, created_at,
-               product_id, product_name, reserved_until)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id
+               product_id, product_name, reserved_until, shop_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id
         """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address,
-              p["price"], now, pid, p["name"], now + RESERVE_MINUTES * 60))
+              p["price"], now, pid, p["name"], now + RESERVE_MINUTES * 60, shop_id()))
         return cur.fetchone()["id"], "ok"
 
 
 def hold_for_payment(order_id, user_id):
     """pre_checkout: يتأكد أن الطلب صالح ويمدّد الحجز. يرجع الطلب أو None."""
     with cursor() as cur:
-        cur.execute("SELECT * FROM shop_orders WHERE id=?", (order_id,))
+        cur.execute("SELECT * FROM shop_orders WHERE id=? AND shop_id=?", (order_id, shop_id()))
         o = cur.fetchone()
         if not o or o["status"] != "pending" or o["user_id"] != user_id:
             return None
@@ -368,7 +405,8 @@ def hold_for_payment(order_id, user_id):
 def mark_paid(order_id, charge_id):
     """returns (status, order) : ok / soldout / dup / invalid"""
     with cursor() as cur:
-        cur.execute("SELECT * FROM shop_orders WHERE id=?" + (" FOR UPDATE" if USE_PG else ""), (order_id,))
+        cur.execute("SELECT * FROM shop_orders WHERE id=? AND shop_id=?" + (" FOR UPDATE" if USE_PG else ""),
+                    (order_id, shop_id()))
         o = cur.fetchone()
         if not o:
             return "invalid", None
@@ -397,14 +435,16 @@ def mark_paid(order_id, charge_id):
 def set_order(order_id, status, charge_id=None):
     with cursor() as cur:
         if charge_id:
-            cur.execute("UPDATE shop_orders SET status=?, charge_id=? WHERE id=?", (status, charge_id, order_id))
+            cur.execute("UPDATE shop_orders SET status=?, charge_id=? WHERE id=? AND shop_id=?",
+                        (status, charge_id, order_id, shop_id()))
         else:
-            cur.execute("UPDATE shop_orders SET status=? WHERE id=?", (status, order_id))
+            cur.execute("UPDATE shop_orders SET status=? WHERE id=? AND shop_id=?",
+                        (status, order_id, shop_id()))
 
 
 def get_order(order_id):
     with cursor() as cur:
-        cur.execute("SELECT * FROM shop_orders WHERE id=?", (order_id,))
+        cur.execute("SELECT * FROM shop_orders WHERE id=? AND shop_id=?", (order_id, shop_id()))
         return cur.fetchone()
 
 
@@ -412,15 +452,16 @@ def list_orders(limit=10):
     with cursor() as cur:
         cur.execute("""
             SELECT * FROM shop_orders
-            WHERE status IN ('paid','shipped','refunded')
+            WHERE shop_id=? AND status IN ('paid','shipped','refunded')
             ORDER BY id DESC LIMIT ?
-        """, (limit,))
+        """, (shop_id(), limit))
         return cur.fetchall()
 
 
 def restock_one(pid):
     with cursor() as cur:
-        cur.execute("UPDATE shop_products SET stock = stock + 1 WHERE id=? AND stock >= 0", (pid,))
+        cur.execute("UPDATE shop_products SET stock = stock + 1 WHERE id=? AND shop_id=? AND stock >= 0",
+                    (pid, shop_id()))
 
 
 # ───────────────────────── نصوص ─────────────────────────
@@ -469,7 +510,8 @@ def wilaya_keyboard():
 
 # ───────────────────────── واجهة الزبون ─────────────────────────
 def is_admin(update):
-    return bool(update.effective_user) and ADMIN_ID != 0 and update.effective_user.id == ADMIN_ID
+    a = shop_admin()
+    return bool(update.effective_user) and a != 0 and update.effective_user.id == a
 
 
 async def show_list(message, prods):
@@ -524,11 +566,15 @@ async def show_product(message, p, uid):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_admin(update):
-        await set_admin_commands(context.bot)
+    admin = is_admin(update)
+    if admin:
+        await set_admin_commands(context.bot, shop_admin(), shop_id() == 0)
     prods = list_products()
     if not prods:
-        await update.message.reply_text("🚧 لا توجد منتجات حالياً.")
+        msg = "🚧 لا توجد منتجات حالياً."
+        if admin:
+            msg += "\n\nأنت الأدمن: اكتب /addproduct لإضافة أول منتج."
+        await update.message.reply_text(msg)
         return ConversationHandler.END
     if len(prods) == 1:
         await show_product(update.message, prods[0], update.effective_user.id)
@@ -717,9 +763,10 @@ async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def notify_admin(context, text):
-    if ADMIN_ID:
+    a = shop_admin()
+    if a:
         try:
-            await context.bot.send_message(ADMIN_ID, text)
+            await context.bot.send_message(a, text)
         except Exception as e:
             log.error("admin notify failed: %s", e)
 
@@ -1202,7 +1249,7 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    await update.message.reply_text(
+    t = (
         "🛠 <b>أوامر الأدمن</b>\n\n"
         "/addproduct — إضافة منتج جديد\n"
         "/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، إخفاء، حذف)\n"
@@ -1210,6 +1257,114 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/shipped رقم — تم الشحن\n"
         "/refund رقم — استرجاع النجوم"
     )
+    if shop_id() == 0:
+        t += (
+            "\n\n🤖 <b>البوتات المتعددة</b>\n"
+            "أرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n"
+            "/bots — البوتات المرتبطة\n"
+            "/delbot ID — فصل بوت وإيقافه"
+        )
+    await update.message.reply_text(t)
+
+
+# ───────────────────────── إدارة البوتات المتعددة (البوت الرئيسي فقط) ─────────────────────────
+async def got_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الأدمن يرسل توكن بوت جديد ← يُتحقق منه ويُحفظ ويُشغَّل."""
+    if shop_id() != 0 or not is_admin(update):
+        return
+    token = update.message.text.strip()
+    # احذف رسالة التوكن من المحادثة للأمان
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    chat = update.effective_chat.id
+
+    if token == BOT_TOKEN:
+        await context.bot.send_message(chat, "⚠️ هذا توكن البوت الرئيسي نفسه.")
+        return
+    try:
+        async with Bot(token) as b:
+            me = await b.get_me()
+    except Exception as e:
+        await context.bot.send_message(chat, f"❌ التوكن غير صالح: {esc(str(e)[:150])}")
+        return
+
+    owner = update.effective_user.id
+    # إن كان يعمل مسبقاً أعد تشغيله بالتوكن الجديد
+    if me.id in RUNNING:
+        await stop_shop(me.id)
+    with cursor() as cur:
+        cur.execute("SELECT bot_id FROM shop_bots WHERE bot_id=?", (me.id,))
+        exists = cur.fetchone()
+        if exists:
+            cur.execute(
+                "UPDATE shop_bots SET token=?, username=?, owner_id=?, active=1 WHERE bot_id=?",
+                (token, me.username, owner, me.id),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO shop_bots (bot_id, token, username, owner_id, active, created_at) VALUES (?,?,?,?,1,?)",
+                (me.id, token, me.username, owner, int(time.time())),
+            )
+    try:
+        await start_shop(token, {"id": me.id, "admin": owner, "username": me.username})
+    except Exception as e:
+        log.error("start shop failed: %s", e)
+        await context.bot.send_message(chat, f"❌ تعذّر تشغيل البوت: {esc(str(e)[:200])}")
+        return
+
+    await context.bot.send_message(
+        chat,
+        f"✅ تم ربط وتشغيل البوت <b>@{esc(me.username)}</b> (ID: <code>{me.id}</code>)\n\n"
+        f"🔗 افتحه: https://t.me/{esc(me.username)}\n"
+        "اضغط /start هناك — أنت أدمنه، ثم استعمل /addproduct لإضافة منتجاتك.\n\n"
+        "ℹ️ منتجاته وطلباته منفصلة تماماً عن هذا البوت.\n"
+        "🗑 لفصله لاحقاً: <code>/delbot " + str(me.id) + "</code>",
+    )
+
+
+async def cmd_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if shop_id() != 0 or not is_admin(update):
+        return
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_bots ORDER BY created_at")
+        rows = cur.fetchall()
+    if not rows:
+        await update.message.reply_text("لا توجد بوتات مرتبطة. أرسل توكن بوت لإضافته.")
+        return
+    t = "🤖 <b>البوتات المرتبطة</b>\n\n"
+    for r in rows:
+        live = "🟢 يعمل" if r["bot_id"] in RUNNING else ("⚪ متوقف" if r["active"] else "🚫 مفصول")
+        t += f"{live} — @{esc(r['username'])} — ID: <code>{r['bot_id']}</code>\n"
+    await update.message.reply_text(t)
+
+
+async def cmd_delbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if shop_id() != 0 or not is_admin(update):
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("الاستعمال: <code>/delbot ID_البوت</code> (انظر /bots)")
+        return
+    bid = int(context.args[0])
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_bots WHERE bot_id=?", (bid,))
+        r = cur.fetchone()
+    if not r:
+        await update.message.reply_text("لا يوجد بوت بهذا الـ ID.")
+        return
+    await stop_shop(bid)
+    with cursor() as cur:
+        cur.execute("UPDATE shop_bots SET active=0 WHERE bot_id=?", (bid,))
+    await update.message.reply_text(
+        f"🗑 تم إيقاف وفصل @{esc(r['username'])}.\n"
+        "(بياناته محفوظة؛ إن أرسلت توكنه مجدداً يعود بمنتجاته.)"
+    )
+
+
+async def bind_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعمل أولاً مع كل تحديث ويحدد أي متجر يخدمه."""
+    _shop.set(context.application.bot_data["shop"])
 
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
@@ -1226,26 +1381,66 @@ ADMIN_COMMANDS = [
     BotCommand("start", "🏠 الصفحة الرئيسية"),
 ]
 
+MAIN_COMMANDS = [
+    BotCommand("bots", "🤖 البوتات المرتبطة"),
+    BotCommand("delbot", "🗑 فصل بوت (ID)"),
+]
 
-async def set_admin_commands(bot):
-    if not ADMIN_ID:
+
+async def set_admin_commands(bot, admin_id, is_main=False):
+    if not admin_id:
         return
     try:
-        await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(ADMIN_ID))
+        cmds = ADMIN_COMMANDS + (MAIN_COMMANDS if is_main else [])
+        await bot.set_my_commands(cmds, scope=BotCommandScopeChat(admin_id))
     except Exception as e:
         log.warning("admin set_my_commands failed: %s", e)
 
 
-async def setup_commands(app: Application):
+async def setup_commands(bot, admin_id, is_main=False):
     try:
-        await app.bot.set_my_commands([BotCommand("start", "🏠 الصفحة الرئيسية")], scope=BotCommandScopeDefault())
+        await bot.set_my_commands([BotCommand("start", "🏠 الصفحة الرئيسية")], scope=BotCommandScopeDefault())
     except Exception as e:
         log.warning("default set_my_commands failed: %s", e)
-    await set_admin_commands(app.bot)
+    await set_admin_commands(bot, admin_id, is_main)
+
+
+# ───────────────────────── تشغيل البوتات الفرعية ─────────────────────────
+async def start_shop(token, shop):
+    app = build_app(token, shop, is_main=False)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    RUNNING[shop["id"]] = app
+    await setup_commands(app.bot, shop["admin"], False)
+    log.info("Shop bot @%s started", shop.get("username"))
+
+
+async def stop_shop(bid):
+    app = RUNNING.pop(bid, None)
+    if app:
+        try:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+        except Exception as e:
+            log.warning("stop shop failed: %s", e)
+
+
+async def load_shops():
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_bots WHERE active=1")
+        rows = cur.fetchall()
+    for r in rows:
+        try:
+            await start_shop(r["token"], {"id": r["bot_id"], "admin": r["owner_id"], "username": r["username"]})
+        except Exception as e:
+            log.error("failed to start shop bot %s: %s", r["bot_id"], e)
 
 
 async def post_init(app: Application):
-    await setup_commands(app)
+    await setup_commands(app.bot, ADMIN_ID, True)
+    await load_shops()
     if not ADMIN_ID:
         return
     msg = "✅ البوت يعمل.\n"
@@ -1255,9 +1450,11 @@ async def post_init(app: Application):
         msg += f"🗄 قاعدة البيانات: SQLite ({os.path.abspath(DB_PATH)})"
         if not os.path.abspath(DB_PATH).startswith("/data"):
             msg += (
-                "\n\n⚠️ الملف مؤقت: عند إعادة النشر قد تضيع المنتجات. "
+                "\n\n⚠️ الملف مؤقت: عند إعادة النشر قد تضيع المنتجات والبوتات المرتبطة. "
                 "اربط Volume على /data وضع DB_PATH=/data/shop.db"
             )
+    if RUNNING:
+        msg += f"\n🤖 بوتات فرعية تعمل: {len(RUNNING)}"
     msg += "\n\nاكتب /help لعرض الأوامر."
     try:
         await app.bot.send_message(ADMIN_ID, msg)
@@ -1265,18 +1462,17 @@ async def post_init(app: Application):
         log.warning("startup notice failed: %s", e)
 
 
-# ───────────────────────── تشغيل ─────────────────────────
-def main():
-    init_db()
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .defaults(Defaults(parse_mode=ParseMode.HTML))
-        .post_init(post_init)
-        .build()
-    )
+async def post_shutdown(app: Application):
+    for bid in list(RUNNING):
+        await stop_shop(bid)
 
+
+# ───────────────────────── تسجيل الـ Handlers ─────────────────────────
+def register_handlers(app: Application, is_main: bool):
     text_only = filters.TEXT & ~filters.COMMAND
+
+    # يحدد المتجر قبل أي handler آخر (group -1)
+    app.add_handler(TypeHandler(Update, bind_shop), group=-1)
 
     admin_conv = ConversationHandler(
         entry_points=[
@@ -1349,8 +1545,30 @@ def main():
     app.add_handler(CommandHandler("orders", cmd_orders))
     app.add_handler(CommandHandler("shipped", cmd_shipped))
     app.add_handler(CommandHandler("refund", cmd_refund))
+
+    if is_main:
+        app.add_handler(CommandHandler("bots", cmd_bots))
+        app.add_handler(CommandHandler("delbot", cmd_delbot))
+        # أي رسالة نصية على شكل توكن بوت (تُعالَج فقط إن لم تكن داخل محادثة نشطة)
+        app.add_handler(MessageHandler(filters.TEXT & filters.Regex(TOKEN_RE), got_token))
+
     app.add_error_handler(on_error)
 
+
+def build_app(token, shop, is_main=False):
+    b = Application.builder().token(token).defaults(Defaults(parse_mode=ParseMode.HTML))
+    if is_main:
+        b = b.post_init(post_init).post_shutdown(post_shutdown)
+    app = b.build()
+    app.bot_data["shop"] = shop
+    register_handlers(app, is_main)
+    return app
+
+
+# ───────────────────────── تشغيل ─────────────────────────
+def main():
+    init_db()
+    app = build_app(BOT_TOKEN, {"id": 0, "admin": ADMIN_ID, "username": None}, is_main=True)
     log.info("Bot started (polling)")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
