@@ -2,12 +2,14 @@ import os
 import re
 import html
 import time
+import asyncio
 import sqlite3
 import logging
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+import httpx
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -37,6 +39,11 @@ PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "آلة لحام بلاستيك PF
 DEFAULT_DESC = os.environ.get("PRODUCT_DESC", "آلة لحام بلاستيك PFS-300 — جاهزة للاستعمال.")
 ENV_PHOTO = os.environ.get("PRODUCT_PHOTO_URL", "")
 PRICE_STARS = int(os.environ.get("PRICE_STARS", "5000"))
+
+# ── TON ──
+TON_WALLET = os.environ.get("TON_WALLET", "")          # محفظة البوت الرئيسي (اختياري، أو استعمل /setwallet)
+TONCENTER_KEY = os.environ.get("TONCENTER_KEY", "")    # مفتاح مجاني من @tonapibot (اختياري لكن يُنصح به)
+WALLET_RE = re.compile(r"^(EQ|UQ)[A-Za-z0-9_-]{46}$")
 
 RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
@@ -86,6 +93,7 @@ _S = [
      "🛍 <b>Our products</b>\n\nPick a product to see its details 👇"),
     ("product_gone", "هذا المنتج لم يعد متوفراً.", "This product is no longer available."),
     ("price_line", "💰 السعر: <b>{price} ⭐</b> (نجوم تيليجرام)\n", "💰 Price: <b>{price} ⭐</b> (Telegram Stars)\n"),
+    ("price_ton_line", "💎 أو: <b>{ton} TON</b>\n", "💎 Or: <b>{ton} TON</b>\n"),
     ("stock_line", "📦 المتوفر: <b>{n}</b>\n", "📦 In stock: <b>{n}</b>\n"),
     ("dz_only", "🇩🇿 البيع والتوصيل داخل الجزائر فقط\n", "🇩🇿 Sales and delivery inside Algeria only\n"),
     ("digital_note", "💾 منتج رقمي — يصلك مباشرة بعد الدفع\n", "💾 Digital product — delivered right after payment\n"),
@@ -101,6 +109,7 @@ _S = [
     ("btn_edit_addr", "✏️ تعديل الولاية/العنوان", "✏️ Edit wilaya/address"),
     ("summary_title", "📋 <b>راجع طلبك:</b>\n\n🛍 {name}\n", "📋 <b>Review your order:</b>\n\n🛍 {name}\n"),
     ("summary_amount", "\n💰 المبلغ: <b>{price}⭐</b>", "\n💰 Amount: <b>{price}⭐</b>"),
+    ("summary_amount_ton", " / <b>{ton} TON</b>", " / <b>{ton} TON</b>"),
     ("phone_ask",
      "🇩🇿 للتأكد أنك من الجزائر، شارك رقم هاتفك بالضغط على الزر أدناه.\n(يجب أن يكون الرقم جزائري +213 ومرتبط بحسابك)",
      "🇩🇿 To confirm you are in Algeria, share your phone number using the button below.\n(It must be an Algerian +213 number linked to your account)"),
@@ -144,6 +153,32 @@ _S = [
     ("shipped_user", "🚚 طلبك #{id} في الطريق إليك! سيتصل بك المُوصِّل قريباً.",
      "🚚 Your order #{id} is on its way! The courier will contact you soon."),
     ("refunded_user", "💸 تم استرجاع نجوم الطلب #{id} إلى حسابك.", "💸 The stars for order #{id} have been refunded to your account."),
+    # TON
+    ("btn_ton_open", "💎 فتح Tonkeeper والدفع", "💎 Open Tonkeeper & pay"),
+    ("btn_ton_check", "🔄 تحقق من الدفع", "🔄 Check payment"),
+    ("ton_pay_msg",
+     "💎 <b>الدفع بعملة TON</b>\n\nالمبلغ: <b>{amt} TON</b>\nالعنوان:\n<code>{addr}</code>\nالتعليق (إلزامي، لا تغيّره):\n<code>{memo}</code>\n\nاضغط الزر لفتح Tonkeeper. بعد التحويل يتأكد البوت تلقائياً (أو اضغط «تحقق»).",
+     "💎 <b>Pay with TON</b>\n\nAmount: <b>{amt} TON</b>\nAddress:\n<code>{addr}</code>\nComment (required, do not change):\n<code>{memo}</code>\n\nTap the button to open Tonkeeper. The bot confirms automatically after the transfer (or tap “Check”)."),
+    ("ton_not_found", "⏳ لم يصل التحويل بعد. انتظر قليلاً (قد يستغرق دقيقة) ثم أعد المحاولة.",
+     "⏳ Transfer not received yet. Wait a bit (it may take a minute) and try again."),
+    ("ton_already", "✅ هذا الطلب مدفوع مسبقاً.", "✅ This order is already paid."),
+    ("ton_invalid_order", "الطلب لم يعد صالحاً.", "This order is no longer valid."),
+    ("ton_manual_user", "⚠️ وصل تحويلك لكن الطلب لم يعد متاحاً. سيتواصل معك المشرف لاسترجاع المبلغ.",
+     "⚠️ Your transfer arrived but the order is no longer available. The admin will contact you for a refund."),
+    ("adm_ton_manual",
+     "🚨 <b>دفع TON يحتاج تدخلاً يدوياً</b>\nالطلب: #{oid}\nالمستخدم: <code>{uid}</code>\nالهاش: <code>{h}</code>\nالحالة: {why}",
+     "🚨 <b>TON payment needs manual handling</b>\nOrder: #{oid}\nUser: <code>{uid}</code>\nHash: <code>{h}</code>\nStatus: {why}"),
+    ("pt_ton", "💎 سعر TON: {p}", "💎 TON price: {p}"),
+    ("b_ton", "💎 سعر TON", "💎 TON price"),
+    ("ep_ton", "💎 اكتب السعر بعملة TON (مثال: 1.5) أو - لإلغاء الدفع بـ TON:",
+     "💎 Type the price in TON (e.g. 1.5) or - to disable TON payment:"),
+    ("bad_ton", "⚠️ اكتب رقماً صالحاً (مثل 0.5).", "⚠️ Enter a valid number (e.g. 0.5)."),
+    ("wallet_usage", "الاستعمال: <code>/setwallet عنوان_المحفظة</code>\nالمحفظة الحالية: <code>{w}</code>",
+     "Usage: <code>/setwallet WALLET_ADDRESS</code>\nCurrent wallet: <code>{w}</code>"),
+    ("wallet_bad", "⚠️ عنوان محفظة غير صالح (يبدأ بـ UQ أو EQ).", "⚠️ Invalid wallet address (starts with UQ or EQ)."),
+    ("wallet_ok", "✅ تم حفظ محفظة TON لهذا المتجر.", "✅ TON wallet saved for this shop."),
+    ("help_ton", "\n/setwallet عنوان — محفظة TON لاستلام الدفع", "\n/setwallet address — TON wallet to receive payments"),
+    ("cmd_setwallet", "💎 محفظة TON", "💎 TON wallet"),
     # إشعارات الأدمن
     ("adm_digital_nodeliv", "⚠️ طلب رقمي #{oid} بلا محتوى تسليم! أرسله للزبون يدوياً (ID: <code>{uid}</code>).",
      "⚠️ Digital order #{oid} has no delivery content! Send it to the customer manually (ID: <code>{uid}</code>)."),
@@ -249,8 +284,8 @@ _S = [
     ("refund_fail", "فشل الاسترجاع: {err}", "Refund failed: {err}"),
     ("refund_ok", "💸 تم استرجاع {amount}⭐ للطلب #{id}.", "💸 Refunded {amount}⭐ for order #{id}."),
     ("help_admin",
-     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقل الزبون، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير لغة المتجر للجميع",
-     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer field, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change the shop language (for everyone)"),
+     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقل الزبون، سعر TON، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير لغة المتجر للجميع",
+     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer field, TON price, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change the shop language (for everyone)"),
     ("help_multi",
      "\n\n🤖 <b>البوتات المتعددة</b>\nأرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n/bots — البوتات المرتبطة\n/delbot ID — فصل بوت وإيقافه",
      "\n\n🤖 <b>Multiple bots</b>\nSend a <b>new bot token</b> (from @BotFather) here to link and start it right away.\n/bots — linked bots\n/delbot ID — unlink and stop a bot"),
@@ -472,6 +507,9 @@ def init_db():
     ensure_column("shop_products", "extra_type", "TEXT")
     ensure_column("shop_orders", "extra_label", "TEXT")
     ensure_column("shop_orders", "extra_value", "TEXT")
+    # الدفع بعملة TON
+    ensure_column("shop_products", "price_ton", "DOUBLE PRECISION")
+    ensure_column("shop_orders", "ton_nano", "BIGINT")
 
     if USE_PG:
         with cursor() as cur:
@@ -551,9 +589,32 @@ def set_shop_lang(sid, lang):
     _SHOP_LANG[sid] = lang
 
 
+# ── محفظة TON (لكل متجر محفظته) ──
+def get_wallet():
+    sid = shop_id()
+    try:
+        with cursor() as cur:
+            cur.execute("SELECT value FROM shop_settings WHERE key=?", (f"ton_wallet_{sid}",))
+            r = cur.fetchone()
+        if r and r["value"]:
+            return r["value"]
+    except Exception as e:
+        log.warning("get_wallet failed: %s", e)
+    return TON_WALLET if sid == 0 else ""
+
+
+def set_wallet(w):
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO shop_settings (key, value) VALUES (?,?) "
+            "ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+            (f"ton_wallet_{shop_id()}", w),
+        )
+
+
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
 PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active",
-                  "extra_label", "extra_type"}
+                  "extra_label", "extra_type", "price_ton"}
 
 
 def add_product(name, desc, price, stock, shipping, active=1):
@@ -763,6 +824,11 @@ def stock_label(stock):
     return T("unlimited") if stock < 0 else str(stock)
 
 
+def fmt_ton(v):
+    """يعرض مبلغ TON بدون أصفار زائدة."""
+    return f"{float(v):.9f}".rstrip("0").rstrip(".")
+
+
 def order_text(o, lang=None):
     name = o.get("product_name") or PRODUCT_NAME
     uname = f"@{esc(o['username'])}" if o.get("username") else "—"
@@ -777,7 +843,10 @@ def order_text(o, lang=None):
         t += T("ot_digital", lang) + "\n"
     if o.get("extra_value"):
         t += f"🧩 {esc(o.get('extra_label') or '—')}: <code>{esc(o['extra_value'])}</code>\n"
-    t += f"💰 {o['amount']}⭐"
+    if str(o.get("charge_id") or "").startswith("ton_"):
+        t += f"💎 {fmt_ton((o.get('ton_nano') or 0) / 1e9)} TON\n"
+    else:
+        t += f"💰 {o['amount']}⭐"
     return t
 
 
@@ -815,6 +884,8 @@ async def show_product(message, p, uid):
     if p["description"]:
         text += f"{esc(p['description'])}\n\n"
     text += T("price_line", price=p["price"])
+    if p.get("price_ton") and get_wallet():
+        text += T("price_ton_line", ton=fmt_ton(p["price_ton"]))
     if p["shipping"]:
         if p["stock"] >= 0:
             text += T("stock_line", n=p["stock"])
@@ -939,6 +1010,8 @@ async def send_summary(message, context):
     if p.get("extra_label") and d.get("extra"):
         text += f"🧩 {esc(p['extra_label'])}: <b>{esc(d['extra'])}</b>\n"
     text += T("summary_amount", price=p["price"])
+    if p.get("price_ton") and get_wallet():
+        text += T("summary_amount_ton", ton=fmt_ton(p["price_ton"]))
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -1083,6 +1156,27 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         currency="XTR",
         prices=[LabeledPrice(p["name"][:32], order["amount"])],
     )
+
+    # ── خيار الدفع بعملة TON (إن حدّد الأدمن سعراً بالتون ومحفظة) ──
+    wallet = get_wallet()
+    if wallet and p.get("price_ton"):
+        nano = to_nano(p["price_ton"])
+        with cursor() as cur:
+            cur.execute("UPDATE shop_orders SET ton_nano=? WHERE id=?", (nano, oid))
+        memo = ton_memo(oid)
+        url = f"https://app.tonkeeper.com/transfer/{wallet}?amount={nano}&text={memo}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(T("btn_ton_open"), url=url)],
+            [InlineKeyboardButton(T("btn_ton_check"), callback_data=f"tonchk_{oid}")],
+        ])
+        await context.bot.send_message(
+            q.message.chat_id,
+            T("ton_pay_msg", amt=fmt_ton(nano / 1e9), addr=esc(wallet), memo=esc(memo)),
+            reply_markup=kb,
+        )
+        task = asyncio.create_task(watch_ton(context, oid))
+        TON_TASKS.add(task)
+        task.add_done_callback(TON_TASKS.discard)
     return ConversationHandler.END
 
 
@@ -1137,44 +1231,168 @@ async def deliver_digital(context, chat_id, p):
     return sent
 
 
+async def finalize_paid(context, uid, oid, status, order, charge, stars=True):
+    """منطق ما بعد الدفع المشترك بين النجوم و TON."""
+    if status == "ok":
+        p = get_product(order["product_id"]) if order.get("product_id") else None
+        if p and not p["shipping"]:
+            await context.bot.send_message(uid, T("paid_ok_digital", oid=oid))
+            ok = False
+            try:
+                ok = await deliver_digital(context, uid, p)
+            except Exception as e:
+                log.error("digital delivery failed: %s", e)
+            if not ok:
+                await context.bot.send_message(uid, T("will_send"))
+                await notify_admin(context, lambda L: T("adm_digital_nodeliv", L, oid=oid, uid=uid))
+        else:
+            await context.bot.send_message(uid, T("paid_ok_ship", oid=oid))
+        await notify_admin(context, lambda L: T("adm_new_paid", L) + order_text(order, L))
+        return
+    if status == "dup":
+        return
+
+    # soldout / invalid
+    if stars:
+        try:
+            await context.bot.refund_star_payment(user_id=uid, telegram_payment_charge_id=charge)
+            if oid:
+                set_order(oid, "refunded", charge)
+            await context.bot.send_message(uid, T("refunded_soldout"))
+            await notify_admin(context, lambda L: T("adm_late", L, oid=oid))
+        except Exception as e:
+            log.error("auto refund failed: %s", e)
+            await context.bot.send_message(uid, T("refund_problem"))
+            await notify_admin(
+                context,
+                lambda L: T("adm_manual_refund", L, uid=uid, charge=esc(charge), err=esc(e)),
+            )
+    else:
+        # TON: لا استرجاع تلقائي، يلزم تدخل الأدمن
+        try:
+            await context.bot.send_message(uid, T("ton_manual_user"))
+        except Exception as e:
+            log.warning("ton user notify failed: %s", e)
+        await notify_admin(
+            context,
+            lambda L: T("adm_ton_manual", L, oid=oid, uid=uid, h=esc(charge), why=esc(status)),
+        )
+
+
 async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sp = update.message.successful_payment
     uid = update.effective_user.id
     oid = parse_order_id(sp.invoice_payload)
     charge = sp.telegram_payment_charge_id
     status, order = mark_paid(oid, charge) if oid else ("invalid", None)
+    await finalize_paid(context, uid, oid, status, order, charge, stars=True)
 
-    if status == "ok":
-        p = get_product(order["product_id"]) if order.get("product_id") else None
-        if p and not p["shipping"]:
-            await update.message.reply_text(T("paid_ok_digital", oid=oid))
-            ok = False
-            try:
-                ok = await deliver_digital(context, update.effective_chat.id, p)
-            except Exception as e:
-                log.error("digital delivery failed: %s", e)
-            if not ok:
-                await update.message.reply_text(T("will_send"))
-                await notify_admin(context, lambda L: T("adm_digital_nodeliv", L, oid=oid, uid=uid))
-        else:
-            await update.message.reply_text(T("paid_ok_ship", oid=oid))
-        await notify_admin(context, lambda L: T("adm_new_paid", L) + order_text(order, L))
-    elif status == "dup":
-        return
-    else:
+
+# ───────────────────────── الدفع بعملة TON ─────────────────────────
+TON_TASKS = set()
+
+
+def ton_memo(oid):
+    return f"order_{oid}"
+
+
+def to_nano(ton):
+    return int(round(float(ton) * 1_000_000_000))
+
+
+async def find_ton_payment(wallet, oid, min_nano, since):
+    """يبحث في آخر معاملات المحفظة عن تحويل بنفس التعليق وبمبلغ كافٍ. يرجع الهاش أو None."""
+    if not wallet or not min_nano:
+        return None
+    params = {"address": wallet, "limit": 50}
+    if TONCENTER_KEY:
+        params["api_key"] = TONCENTER_KEY
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get("https://toncenter.com/api/v2/getTransactions", params=params)
+        data = r.json()
+    except Exception as e:
+        log.warning("toncenter request failed: %s", e)
+        return None
+    if not data.get("ok"):
+        log.warning("toncenter error: %s", str(data)[:150])
+        return None
+    memo = ton_memo(oid)
+    for tx in data.get("result", []):
+        m = tx.get("in_msg") or {}
+        if not m.get("source"):           # تجاهل المعاملات غير الواردة
+            continue
+        if int(tx.get("utime") or 0) < int(since or 0) - 60:
+            continue
+        if (m.get("message") or "").strip() != memo:
+            continue
         try:
-            await context.bot.refund_star_payment(user_id=uid, telegram_payment_charge_id=charge)
-            if oid:
-                set_order(oid, "refunded", charge)
-            await update.message.reply_text(T("refunded_soldout"))
-            await notify_admin(context, lambda L: T("adm_late", L, oid=oid))
-        except Exception as e:
-            log.error("auto refund failed: %s", e)
-            await update.message.reply_text(T("refund_problem"))
-            await notify_admin(
-                context,
-                lambda L: T("adm_manual_refund", L, uid=uid, charge=esc(charge), err=esc(e)),
-            )
+            value = int(m.get("value") or 0)
+        except ValueError:
+            continue
+        if value >= int(min_nano):
+            return tx["transaction_id"]["hash"]
+    return None
+
+
+async def settle_ton(context, o, tx_hash):
+    charge = "ton_" + tx_hash
+    status, order = mark_paid(o["id"], charge)
+    await finalize_paid(context, o["user_id"], o["id"], status, order, charge, stars=False)
+    return status
+
+
+async def watch_ton(context, oid):
+    """يراقب المحفظة حتى 10 دقائق ثم يتوقف (يبقى زر «تحقق» متاحاً)."""
+    try:
+        for _ in range(60):
+            await asyncio.sleep(10)
+            o = get_order(oid)
+            if not o or o["status"] != "pending":
+                return
+            h = await find_ton_payment(get_wallet(), oid, o.get("ton_nano"), o.get("created_at"))
+            if h:
+                await settle_ton(context, o, h)
+                return
+    except Exception as e:
+        log.error("watch_ton failed: %s", e)
+
+
+async def ton_check_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    try:
+        oid = int(q.data.split("_")[1])
+    except Exception:
+        await q.answer()
+        return
+    o = get_order(oid)
+    if not o or o["user_id"] != q.from_user.id:
+        await q.answer(T("ton_invalid_order"), show_alert=True)
+        return
+    if o["status"] in ("paid", "shipped"):
+        await q.answer(T("ton_already"), show_alert=True)
+        return
+    h = await find_ton_payment(get_wallet(), oid, o.get("ton_nano"), o.get("created_at"))
+    if not h:
+        await q.answer(T("ton_not_found") if o["status"] == "pending" else T("ton_invalid_order"),
+                       show_alert=True)
+        return
+    await q.answer()
+    await settle_ton(context, o, h)
+
+
+async def cmd_setwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if not context.args:
+        await update.message.reply_text(T("wallet_usage", w=esc(get_wallet() or "—")))
+        return
+    w = context.args[0].strip()
+    if not WALLET_RE.match(w):
+        await update.message.reply_text(T("wallet_bad"))
+        return
+    set_wallet(w)
+    await update.message.reply_text(T("wallet_ok"))
 
 
 # ───────────────────────── لوحة الأدمن: المنتجات ─────────────────────────
@@ -1188,6 +1406,10 @@ def panel_text(p):
         f"🗂 <b>{esc(p['name'])}</b>  (#{p['id']})\n\n"
         f"{T('pt_type_ship') if p['shipping'] else T('pt_type_dig')}\n"
         f"{T('pt_price', p=p['price'])}\n"
+    )
+    if p.get("price_ton"):
+        t += T("pt_ton", p=f"{fmt_ton(p['price_ton'])} TON") + "\n"
+    t += (
         f"{T('pt_stock', s=stock_label(p['stock']))}\n"
         f"{T('pt_media', n=n)}\n"
         f"{T('pt_visible') if p['active'] else T('pt_hidden')}\n"
@@ -1209,7 +1431,8 @@ def panel_markup(p):
         [B(T("b_name"), callback_data=f"edt_name_{i}"),
          B(T("b_desc"), callback_data=f"edt_desc_{i}")],
         [B(T("b_price"), callback_data=f"edt_price_{i}"),
-         B(T("b_stock"), callback_data=f"edt_stock_{i}")],
+         B(T("b_ton"), callback_data=f"edt_ton_{i}")],
+        [B(T("b_stock"), callback_data=f"edt_stock_{i}")],
         [B(T("b_photos"), callback_data=f"edt_photos_{i}"),
          B(T("b_clr"), callback_data=f"adm_clrphotos_{i}")],
         [B(T("b_to_dig") if p["shipping"] else T("b_to_phys"), callback_data=f"adm_ship_{i}")],
@@ -1506,6 +1729,18 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(T("bad_price"))
             return E_VALUE
         update_product(pid, price=int(t))
+    elif field == "ton":
+        if t == "-":
+            update_product(pid, price_ton=None)
+        else:
+            try:
+                v = float(t.translate(AR_DIGITS).replace(",", ".").replace(" ", ""))
+            except ValueError:
+                v = 0
+            if not (0 < v <= 1000000):
+                await update.message.reply_text(T("bad_ton"))
+                return E_VALUE
+            update_product(pid, price_ton=v)
     elif field == "stock":
         n = parse_stock(t, p["shipping"])
         if n is None:
@@ -1608,6 +1843,10 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not o or o["status"] not in ("paid", "shipped") or not o["charge_id"]:
         await update.message.reply_text(T("refund_bad"))
         return
+    if str(o["charge_id"]).startswith("ton_"):
+        # دفع TON: الاسترجاع يدوي من محفظتك، لا يمكن عبر Telegram Stars
+        await update.message.reply_text(T("refund_bad"))
+        return
     try:
         await context.bot.refund_star_payment(user_id=o["user_id"], telegram_payment_charge_id=o["charge_id"])
     except Exception as e:
@@ -1627,7 +1866,7 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    t = T("help_admin")
+    t = T("help_admin") + T("help_ton")
     if shop_id() == 0:
         t += T("help_multi")
     await update.message.reply_text(t)
@@ -1736,6 +1975,7 @@ def admin_commands(lang, is_main):
         BotCommand("orders", T("cmd_orders", lang)),
         BotCommand("shipped", T("cmd_shipped", lang)),
         BotCommand("refund", T("cmd_refund", lang)),
+        BotCommand("setwallet", T("cmd_setwallet", lang)),
         BotCommand("help", T("cmd_help", lang)),
         BotCommand("lang", T("cmd_lang", lang)),
         BotCommand("start", T("cmd_start", lang)),
@@ -1845,7 +2085,7 @@ def register_handlers(app: Application, is_main: bool):
         entry_points=[
             CommandHandler("addproduct", cmd_addproduct),
             CallbackQueryHandler(new_product_cb, pattern=r"^adm_new$"),
-            CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|stock|photos|deliv|extra)_\d+$"),
+            CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|ton|stock|photos|deliv|extra)_\d+$"),
         ],
         states={
             A_NAME: [MessageHandler(text_only, got_name)],
@@ -1909,6 +2149,7 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(CallbackQueryHandler(list_cb, pattern=r"^list$"))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
+    app.add_handler(CallbackQueryHandler(ton_check_cb, pattern=r"^tonchk_\d+$"))
 
     app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
     app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|clrphotos|del|delyes)_\d+$"))
@@ -1917,6 +2158,7 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(CommandHandler("orders", cmd_orders))
     app.add_handler(CommandHandler("shipped", cmd_shipped))
     app.add_handler(CommandHandler("refund", cmd_refund))
+    app.add_handler(CommandHandler("setwallet", cmd_setwallet))
 
     if is_main:
         app.add_handler(CommandHandler("bots", cmd_bots))
