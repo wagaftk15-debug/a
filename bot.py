@@ -30,65 +30,72 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("shop-bot")
 
-# ───────────────────────── الإعدادات ─────────────────────────
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 1) الإعدادات
+# ═════════════════════════════════════════════════════════════════════════════
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "0") or 0)
-
-# تُستعمل فقط لإنشاء أول منتج تلقائياً (إذا كانت قاعدة البيانات فارغة)
-PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "آلة لحام بلاستيك PFS-300")
-DEFAULT_DESC = os.environ.get("PRODUCT_DESC", "آلة لحام بلاستيك PFS-300 — جاهزة للاستعمال.")
-ENV_PHOTO = os.environ.get("PRODUCT_PHOTO_URL", "")
-PRICE_STARS = int(os.environ.get("PRICE_STARS", "5000"))
+DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
 # ── TON ──
 TON_WALLET = os.environ.get("TON_WALLET", "")          # محفظة البوت الرئيسي (اختياري، أو استعمل /setwallet)
 TONCENTER_KEY = os.environ.get("TONCENTER_KEY", "")    # مفتاح مجاني من @tonapibot (اختياري لكن يُنصح به)
 WALLET_RE = re.compile(r"^(EQ|UQ)[A-Za-z0-9_-]{46}$")
+TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
+PAID_RE = re.compile(r"(دفعت|حولت|حوّلت|تم الدفع|تم التحويل|paid|sent|transferred|done)", re.I)
 
 RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
-DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
-# اللغة الافتراضية لمن لم يختر لغة بعد: ar أو en
+# اللغة الافتراضية: ar أو en
 LANGS = ("ar", "en")
 DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "ar").lower()
 if DEFAULT_LANG not in LANGS:
     DEFAULT_LANG = "ar"
 
-# حالات طلب الزبون
+# حالات محادثة الزبون
 PHONE, WILAYA, ADDRESS, CONFIRM, EXTRA = range(5)
-# حالات الأدمن
+# حالات محادثة الأدمن
 A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE, X_LABEL, X_TYPE = range(20, 30)
 W_ADDR, A_TON = 30, 31
 
-WILAYAS = [
-    "أدرار", "الشلف", "الأغواط", "أم البواقي", "باتنة", "بجاية", "بسكرة", "بشار", "البليدة", "البويرة",
-    "تمنراست", "تبسة", "تلمسان", "تيارت", "تيزي وزو", "الجزائر", "الجلفة", "جيجل", "سطيف", "سعيدة",
-    "سكيكدة", "سيدي بلعباس", "عنابة", "قالمة", "قسنطينة", "المدية", "مستغانم", "المسيلة", "معسكر", "ورقلة",
-    "وهران", "البيض", "إليزي", "برج بوعريريج", "بومرداس", "الطارف", "تندوف", "تيسمسيلت", "الوادي", "خنشلة",
-    "سوق أهراس", "تيبازة", "ميلة", "عين الدفلى", "النعامة", "عين تموشنت", "غرداية", "غليزان", "تيميمون",
-    "برج باجي مختار", "أولاد جلال", "بني عباس", "عين صالح", "عين قزام", "تقرت", "جانت", "المغير", "المنيعة",
-]
+AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
-WILAYAS_EN = [
-    "Adrar", "Chlef", "Laghouat", "Oum El Bouaghi", "Batna", "Béjaïa", "Biskra", "Béchar", "Blida", "Bouira",
-    "Tamanrasset", "Tébessa", "Tlemcen", "Tiaret", "Tizi Ouzou", "Algiers", "Djelfa", "Jijel", "Sétif", "Saïda",
-    "Skikda", "Sidi Bel Abbès", "Annaba", "Guelma", "Constantine", "Médéa", "Mostaganem", "M'Sila", "Mascara", "Ouargla",
-    "Oran", "El Bayadh", "Illizi", "Bordj Bou Arréridj", "Boumerdès", "El Tarf", "Tindouf", "Tissemsilt", "El Oued", "Khenchela",
-    "Souk Ahras", "Tipaza", "Mila", "Aïn Defla", "Naâma", "Aïn Témouchent", "Ghardaïa", "Relizane", "Timimoun",
-    "Bordj Badji Mokhtar", "Ouled Djellal", "Béni Abbès", "In Salah", "In Guezzam", "Touggourt", "Djanet", "El M'Ghair", "El Menia",
-]
 
-# ───────────────────────── النصوص (عربي / English) ─────────────────────────
-# (المفتاح، العربية، English)
+# ═════════════════════════════════════════════════════════════════════════════
+# 2) القواميس: الولايات والنصوص المترجمة
+# ═════════════════════════════════════════════════════════════════════════════
+WILAYAS = {
+    "ar": [
+        "أدرار", "الشلف", "الأغواط", "أم البواقي", "باتنة", "بجاية", "بسكرة", "بشار", "البليدة", "البويرة",
+        "تمنراست", "تبسة", "تلمسان", "تيارت", "تيزي وزو", "الجزائر", "الجلفة", "جيجل", "سطيف", "سعيدة",
+        "سكيكدة", "سيدي بلعباس", "عنابة", "قالمة", "قسنطينة", "المدية", "مستغانم", "المسيلة", "معسكر", "ورقلة",
+        "وهران", "البيض", "إليزي", "برج بوعريريج", "بومرداس", "الطارف", "تندوف", "تيسمسيلت", "الوادي", "خنشلة",
+        "سوق أهراس", "تيبازة", "ميلة", "عين الدفلى", "النعامة", "عين تموشنت", "غرداية", "غليزان", "تيميمون",
+        "برج باجي مختار", "أولاد جلال", "بني عباس", "عين صالح", "عين قزام", "تقرت", "جانت", "المغير", "المنيعة",
+    ],
+    "en": [
+        "Adrar", "Chlef", "Laghouat", "Oum El Bouaghi", "Batna", "Béjaïa", "Biskra", "Béchar", "Blida", "Bouira",
+        "Tamanrasset", "Tébessa", "Tlemcen", "Tiaret", "Tizi Ouzou", "Algiers", "Djelfa", "Jijel", "Sétif", "Saïda",
+        "Skikda", "Sidi Bel Abbès", "Annaba", "Guelma", "Constantine", "Médéa", "Mostaganem", "M'Sila", "Mascara", "Ouargla",
+        "Oran", "El Bayadh", "Illizi", "Bordj Bou Arréridj", "Boumerdès", "El Tarf", "Tindouf", "Tissemsilt", "El Oued", "Khenchela",
+        "Souk Ahras", "Tipaza", "Mila", "Aïn Defla", "Naâma", "Aïn Témouchent", "Ghardaïa", "Relizane", "Timimoun",
+        "Bordj Badji Mokhtar", "Ouled Djellal", "Béni Abbès", "In Salah", "In Guezzam", "Touggourt", "Djanet", "El M'Ghair", "El Menia",
+    ],
+}
+
+# كل نص يراه المستخدم أو الأدمن موجود هنا فقط: (المفتاح، العربية، English)
 _S = [
-    # عام
+    # ── عام ──
     ("no_products", "🚧 لا توجد منتجات حالياً.", "🚧 No products available right now."),
     ("admin_add_hint", "\n\nأنت الأدمن: اكتب /addproduct لإضافة أول منتج.",
      "\n\nYou are the admin: send /addproduct to add your first product."),
     ("lang_pick", "🌐 اختر لغة المتجر (تُطبَّق على الجميع):\nChoose the shop language (applies to everyone):",
      "🌐 اختر لغة المتجر (تُطبَّق على الجميع):\nChoose the shop language (applies to everyone):"),
     ("lang_set", "✅ تم تغيير لغة المتجر إلى العربية للجميع.", "✅ Shop language changed to English for everyone."),
+    ("lang_btn_ar", "🇩🇿 العربية", "🇩🇿 العربية"),
+    ("lang_btn_en", "🇬🇧 English", "🇬🇧 English"),
     ("btn_all_products", "🔙 كل المنتجات", "🔙 All products"),
     ("list_title", "🛍 <b>منتجاتنا</b>\n\nاختر منتجاً لعرض تفاصيله 👇",
      "🛍 <b>Our products</b>\n\nPick a product to see its details 👇"),
@@ -104,7 +111,16 @@ _S = [
     ("unavail_held", "⏳ القطعة محجوزة حالياً لزبون آخر (يدفع الآن). جرّب بعد عدة دقائق، فقد تعود متاحة.",
      "⏳ This item is currently reserved for another customer (paying now). Try again in a few minutes; it may become available."),
     ("unlimited", "غير محدود", "Unlimited"),
-    # خطوات الطلب
+    ("unknown_product", "منتج", "Product"),
+
+    # ── حالات الطلب ──
+    ("status_pending", "قيد الانتظار", "Pending"),
+    ("status_paid", "مدفوع", "Paid"),
+    ("status_shipped", "تم الشحن", "Shipped"),
+    ("status_refunded", "مسترجع", "Refunded"),
+    ("status_cancelled", "ملغى", "Cancelled"),
+
+    # ── خطوات الطلب ──
     ("btn_cancel", "❌ إلغاء", "❌ Cancel"),
     ("btn_pay", "⭐ الدفع بالنجوم ({price})", "⭐ Pay with Stars ({price})"),
     ("btn_pay_ton", "💎 الدفع بـ TON ({ton})", "💎 Pay with TON ({ton})"),
@@ -140,7 +156,8 @@ _S = [
      "⏳ Your order is reserved for {m} minutes. Complete the payment using the invoice below 👇"),
     ("invoice_ship_desc", "{name} — توصيل داخل الجزائر", "{name} — delivery inside Algeria"),
     ("cancelled", "تم إلغاء الطلب. اكتب /start للبدء من جديد.", "Order cancelled. Send /start to begin again."),
-    # الدفع
+
+    # ── الدفع ──
     ("precheck_fail", "عذراً، المنتج لم يعد متاحاً أو انتهت مهلة الحجز.",
      "Sorry, the product is no longer available or the reservation expired."),
     ("your_product", "🎁 <b>منتجك:</b>\n\n{text}", "🎁 <b>Your product:</b>\n\n{text}"),
@@ -157,7 +174,8 @@ _S = [
     ("shipped_user", "🚚 طلبك #{id} في الطريق إليك! سيتصل بك المُوصِّل قريباً.",
      "🚚 Your order #{id} is on its way! The courier will contact you soon."),
     ("refunded_user", "💸 تم استرجاع نجوم الطلب #{id} إلى حسابك.", "💸 The stars for order #{id} have been refunded to your account."),
-    # TON
+
+    # ── TON ──
     ("btn_ton_open", "💎 فتح Tonkeeper والدفع", "💎 Open Tonkeeper & pay"),
     ("btn_ton_check", "🔄 تحقق من الدفع", "🔄 Check payment"),
     ("ton_pay_msg",
@@ -190,8 +208,8 @@ _S = [
     ("ton_no_pending", "لا يوجد طلب دفع TON معلّق لك. اضغط «اشتري الآن» من /start.",
      "You have no pending TON order. Tap “Buy now” from /start."),
     ("help_ton", "\n/setwallet عنوان — محفظة TON لاستلام الدفع", "\n/setwallet address — TON wallet to receive payments"),
-    ("cmd_setwallet", "💎 محفظة TON", "💎 TON wallet"),
-    # إشعارات الأدمن
+
+    # ── إشعارات الأدمن ──
     ("adm_digital_nodeliv", "⚠️ طلب رقمي #{oid} بلا محتوى تسليم! أرسله للزبون يدوياً (ID: <code>{uid}</code>).",
      "⚠️ Digital order #{oid} has no delivery content! Send it to the customer manually (ID: <code>{uid}</code>)."),
     ("adm_new_paid", "🔔 <b>طلب مدفوع جديد!</b>\n\n", "🔔 <b>New paid order!</b>\n\n"),
@@ -202,7 +220,8 @@ _S = [
      "🚨 <b>Manual refund needed</b>\nUser: <code>{uid}</code>\ncharge_id: <code>{charge}</code>\nError: {err}"),
     ("ot_head", "📦 <b>طلب #{id}</b> — {status}", "📦 <b>Order #{id}</b> — {status}"),
     ("ot_digital", "💾 منتج رقمي", "💾 Digital product"),
-    # لوحة المنتجات
+
+    # ── لوحة المنتجات ──
     ("not_found", "المنتج غير موجود.", "Product not found."),
     ("pt_type_ship", "النوع: 🚚 مادي (شحن + ولايات)", "Type: 🚚 Physical (shipping + wilayas)"),
     ("pt_type_dig", "النوع: 💾 رقمي (بدون شحن)", "Type: 💾 Digital (no shipping)"),
@@ -235,7 +254,8 @@ _S = [
     ("b_yes_del", "✅ نعم، احذف", "✅ Yes, delete"),
     ("b_no", "🔙 لا", "🔙 No"),
     ("deleted", "🗑 تم حذف المنتج.", "🗑 Product deleted."),
-    # إضافة منتج
+
+    # ── إضافة منتج ──
     ("new_title", "➕ <b>منتج جديد</b>\n\nاكتب <b>اسم المنتج</b>:\n(للإلغاء: /cancel)",
      "➕ <b>New product</b>\n\nType the <b>product name</b>:\n(to cancel: /cancel)"),
     ("bad_name", "⚠️ اكتب اسماً من 2 إلى 100 حرف.", "⚠️ Enter a name of 2 to 100 characters."),
@@ -265,7 +285,8 @@ _S = [
      "🎁 Send <b>what the customer receives after payment</b>:\n• Text (link / code / instructions) — the latest text replaces the previous one\n• and/or a file (send it as a Document)\n\nWhen finished send /done."),
     ("deliv_text_saved", "✅ تم حفظ النص. أرسل ملفاً أيضاً أو اكتب /done.", "✅ Text saved. Send a file too, or /done."),
     ("deliv_file_saved", "✅ تم حفظ الملف. أرسل نصاً أيضاً أو اكتب /done.", "✅ File saved. Send text too, or /done."),
-    # التعديل
+
+    # ── التعديل ──
     ("ep_name", "✏️ اكتب الاسم الجديد:", "✏️ Type the new name:"),
     ("ep_desc", "📝 اكتب الوصف الجديد (أو - لمسحه):", "📝 Type the new description (or - to clear it):"),
     ("ep_price", "💰 اكتب السعر الجديد بالنجوم:", "💰 Type the new price in stars:"),
@@ -276,7 +297,8 @@ _S = [
      "📷 Send the new photos/videos (up to {n}) — they will replace the old ones.\nWhen finished: /done  |  to keep the old ones: /skip"),
     ("updated", "✅ تم التحديث.", "✅ Updated."),
     ("adm_cancelled", "تم الإلغاء.", "Cancelled."),
-    # حقل الزبون
+
+    # ── حقل الزبون ──
     ("x_ask",
      "🧩 اكتب <b>السؤال/الطلب الذي سيظهر للزبون</b> قبل الدفع.\nمثال: <i>أرسل رقم حسابك (ID)</i> أو <i>اكتب اسم اللاعب</i>\n\nأرسل <b>-</b> لحذف الحقل.\n(للإلغاء: /cancel)",
      "🧩 Type the <b>question/request shown to the customer</b> before payment.\nExample: <i>Send your account ID</i> or <i>Type the player name</i>\n\nSend <b>-</b> to remove the field.\n(to cancel: /cancel)"),
@@ -286,7 +308,8 @@ _S = [
     ("b_x_text", "🔤 نص حر", "🔤 Free text"),
     ("x_type_ask", "ما <b>نوع الإجابة</b> المطلوبة من الزبون؟", "What <b>type of answer</b> do you want from the customer?"),
     ("x_saved", "✅ تم حفظ الحقل. سيُطلب من الزبون قبل الدفع.", "✅ Field saved. It will be requested from the customer before payment."),
-    # الطلبات
+
+    # ── الطلبات ──
     ("no_orders", "لا توجد طلبات مدفوعة بعد.", "No paid orders yet."),
     ("shipped_usage", "الاستعمال: <code>/shipped رقم_الطلب</code>", "Usage: <code>/shipped order_number</code>"),
     ("shipped_bad", "الطلب غير موجود أو غير مدفوع.", "Order not found or not paid."),
@@ -301,7 +324,8 @@ _S = [
     ("help_multi",
      "\n\n🤖 <b>البوتات المتعددة</b>\nأرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n/bots — البوتات المرتبطة\n/delbot ID — فصل بوت وإيقافه",
      "\n\n🤖 <b>Multiple bots</b>\nSend a <b>new bot token</b> (from @BotFather) here to link and start it right away.\n/bots — linked bots\n/delbot ID — unlink and stop a bot"),
-    # البوتات المتعددة
+
+    # ── البوتات المتعددة ──
     ("tok_main", "⚠️ هذا توكن البوت الرئيسي نفسه.", "⚠️ This is the main bot's own token."),
     ("tok_invalid", "❌ التوكن غير صالح: {err}", "❌ Invalid token: {err}"),
     ("tok_fail", "❌ تعذّر تشغيل البوت: {err}", "❌ Could not start the bot: {err}"),
@@ -317,7 +341,8 @@ _S = [
     ("delbot_nf", "لا يوجد بوت بهذا الـ ID.", "No bot with this ID."),
     ("delbot_ok", "🗑 تم إيقاف وفصل @{u}.\n(بياناته محفوظة؛ إن أرسلت توكنه مجدداً يعود بمنتجاته.)",
      "🗑 @{u} was stopped and unlinked.\n(Its data is kept; if you send its token again it comes back with its products.)"),
-    # الأوامر (القائمة)
+
+    # ── قائمة الأوامر ──
     ("cmd_start", "🏠 الصفحة الرئيسية", "🏠 Home"),
     ("cmd_lang", "🌐 لغة المتجر للجميع", "🌐 Shop language (for everyone)"),
     ("cmd_addproduct", "➕ إضافة منتج", "➕ Add product"),
@@ -326,9 +351,11 @@ _S = [
     ("cmd_shipped", "🚚 تم الشحن (رقم)", "🚚 Mark shipped (number)"),
     ("cmd_refund", "💸 استرجاع (رقم)", "💸 Refund (number)"),
     ("cmd_help", "🛠 أوامر الأدمن", "🛠 Admin commands"),
+    ("cmd_setwallet", "💎 محفظة TON", "💎 TON wallet"),
     ("cmd_bots", "🤖 البوتات المرتبطة", "🤖 Linked bots"),
     ("cmd_delbot", "🗑 فصل بوت (ID)", "🗑 Unlink a bot (ID)"),
-    # رسالة بدء التشغيل
+
+    # ── رسالة بدء التشغيل ──
     ("su_ok", "✅ البوت يعمل.\n", "✅ The bot is running.\n"),
     ("su_pg", "🗄 قاعدة البيانات: PostgreSQL", "🗄 Database: PostgreSQL"),
     ("su_sqlite", "🗄 قاعدة البيانات: SQLite ({path})", "🗄 Database: SQLite ({path})"),
@@ -346,21 +373,27 @@ _lang = ContextVar("lang", default=DEFAULT_LANG)
 
 
 def T(key, lang=None, **kw):
-    """نص مترجم حسب لغة المستخدم الحالي (أو لغة محددة)."""
+    """نص مترجم حسب لغة المتجر الحالية (أو لغة محددة)."""
     lang = lang or _lang.get()
     s = STR.get(lang, STR["ar"]).get(key) or STR["ar"][key]
     return s.format(**kw)
 
 
 def wilaya_names(lang=None):
-    return WILAYAS_EN if (lang or _lang.get()) == "en" else WILAYAS
+    return WILAYAS.get(lang or _lang.get(), WILAYAS["ar"])
 
 
-# ───────────────────────── سياق المتجر (متعدد البوتات) ─────────────────────────
-TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
+def status_label(status, lang=None):
+    key = f"status_{status}"
+    return T(key, lang) if key in STR["ar"] else str(status)
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 3) سياق المتجر (متعدد البوتات)
+# ═════════════════════════════════════════════════════════════════════════════
 # المتجر الحالي: id=0 هو البوت الرئيسي، وغيره id = bot_id للبوت الفرعي
 _shop = ContextVar("shop", default={"id": 0, "admin": ADMIN_ID, "username": None})
+RUNNING = {}  # bot_id -> Application (البوتات الفرعية فقط)
 
 
 def shop_id():
@@ -371,9 +404,9 @@ def shop_admin():
     return _shop.get()["admin"]
 
 
-RUNNING = {}  # bot_id -> Application (البوتات الفرعية فقط)
-
-# ───────────────────────── قاعدة البيانات ─────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# 4) قاعدة البيانات
+# ═════════════════════════════════════════════════════════════════════════════
 USE_PG = False
 pool = None
 sqlite_conn = None
@@ -506,7 +539,7 @@ def init_db():
             )
         """)
 
-    # ترحيل أعمدة الطلبات القديمة
+    # ترحيل الأعمدة (للقواعد القديمة)
     ensure_column("shop_orders", "product_id", "INT")
     ensure_column("shop_orders", "product_name", "TEXT")
     ensure_column("shop_orders", "reserved_until", "BIGINT")
@@ -537,42 +570,27 @@ def init_db():
                         f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
                     )
 
-    # أول تشغيل: أنشئ منتجاً افتراضياً للبوت الرئيسي (من المنتج القديم إن وُجد)
-    with cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS n FROM shop_products WHERE shop_id=0")
-        n = cur.fetchone()["n"]
-    if n == 0:
-        stock = 1
-        try:
-            with cursor() as cur:
-                cur.execute("SELECT stock FROM shop_product WHERE id=1")
-                r = cur.fetchone()
-                if r:
-                    stock = r["stock"]
-        except Exception:
-            pass
-        pid = add_product(PRODUCT_NAME, get_setting("desc", DEFAULT_DESC), PRICE_STARS, stock, 1, 1)
-        photo = get_setting("photo", ENV_PHOTO)
-        if photo:
-            add_photo(pid, photo)
-        log.info("Created default product #%s", pid)
-
     log.info("DB ready (%s)", "PostgreSQL" if USE_PG else "SQLite")
 
 
-# ── الإعدادات القديمة (للترحيل فقط) ──
-def get_setting(key, default=""):
-    try:
-        with cursor() as cur:
-            cur.execute("SELECT value FROM shop_settings WHERE key=?", (key,))
-            r = cur.fetchone()
-        return r["value"] if r and r["value"] else default
-    except Exception:
-        return default
-
-
-# ── لغة المتجر (يحددها الأدمن وتسري على الجميع) ──
+# ── الإعدادات: لغة المتجر ──
 _SHOP_LANG = {}
+
+
+def _save_setting(key, value):
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO shop_settings (key, value) VALUES (?,?) "
+            "ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+def _load_setting(key):
+    with cursor() as cur:
+        cur.execute("SELECT value FROM shop_settings WHERE key=?", (key,))
+        r = cur.fetchone()
+    return r["value"] if r and r["value"] else None
 
 
 def get_shop_lang(sid):
@@ -580,11 +598,9 @@ def get_shop_lang(sid):
         return _SHOP_LANG[sid]
     lang = DEFAULT_LANG
     try:
-        with cursor() as cur:
-            cur.execute("SELECT value FROM shop_settings WHERE key=?", (f"lang_{sid}",))
-            r = cur.fetchone()
-        if r and r["value"] in LANGS:
-            lang = r["value"]
+        v = _load_setting(f"lang_{sid}")
+        if v in LANGS:
+            lang = v
     except Exception as e:
         log.warning("get_shop_lang failed: %s", e)
     _SHOP_LANG[sid] = lang
@@ -592,37 +608,25 @@ def get_shop_lang(sid):
 
 
 def set_shop_lang(sid, lang):
-    with cursor() as cur:
-        cur.execute(
-            "INSERT INTO shop_settings (key, value) VALUES (?,?) "
-            "ON CONFLICT (key) DO UPDATE SET value=excluded.value",
-            (f"lang_{sid}", lang),
-        )
+    _save_setting(f"lang_{sid}", lang)
     _SHOP_LANG[sid] = lang
 
 
-# ── محفظة TON (لكل متجر محفظته) ──
+# ── الإعدادات: محفظة TON (لكل متجر محفظته) ──
 def get_wallet():
     """محفظة المتجر الحالي، وإلا محفظة البوت الرئيسي (تُستعمل لكل البوتات الفرعية)."""
     for sid in (shop_id(), 0):
         try:
-            with cursor() as cur:
-                cur.execute("SELECT value FROM shop_settings WHERE key=?", (f"ton_wallet_{sid}",))
-                r = cur.fetchone()
-            if r and r["value"]:
-                return r["value"]
+            v = _load_setting(f"ton_wallet_{sid}")
+            if v:
+                return v
         except Exception as e:
             log.warning("get_wallet failed: %s", e)
     return TON_WALLET
 
 
 def set_wallet(w):
-    with cursor() as cur:
-        cur.execute(
-            "INSERT INTO shop_settings (key, value) VALUES (?,?) "
-            "ON CONFLICT (key) DO UPDATE SET value=excluded.value",
-            (f"ton_wallet_{shop_id()}", w),
-        )
+    _save_setting(f"ton_wallet_{shop_id()}", w)
 
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
@@ -672,17 +676,15 @@ def delete_product(pid):
         cur.execute("DELETE FROM shop_products WHERE id=? AND shop_id=?", (pid, shop_id()))
 
 
-def get_photos(pid):
-    with cursor() as cur:
-        cur.execute("SELECT file_id FROM shop_photos WHERE product_id=? ORDER BY id", (pid,))
-        return [r["file_id"] for r in cur.fetchall()]
-
-
 def get_media(pid):
     """صور وفيديوهات المنتج: [{'file_id':..., 'kind':'photo'|'video'}]"""
     with cursor() as cur:
         cur.execute("SELECT file_id, kind FROM shop_photos WHERE product_id=? ORDER BY id", (pid,))
         return [{"file_id": r["file_id"], "kind": r["kind"] or "photo"} for r in cur.fetchall()]
+
+
+def count_media(pid):
+    return len(get_media(pid))
 
 
 def add_photo(pid, file_id, kind="photo"):
@@ -722,6 +724,7 @@ def availability(pid, uid):
     return "available" if p["stock"] - held > 0 else "held"
 
 
+# ── الطلبات ──
 def place_order(user, pid, phone, wilaya, address, extra=None):
     """ينشئ الطلب ويحجز القطعة. returns (order_id, 'ok') أو (None, 'sold'/'held')"""
     with cursor() as cur:
@@ -828,7 +831,9 @@ def restock_one(pid):
                     (pid, shop_id()))
 
 
-# ───────────────────────── نصوص مساعدة ─────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# 5) دوال مساعدة للنصوص والأزرار
+# ═════════════════════════════════════════════════════════════════════════════
 def esc(s):
     return html.escape(str(s or ""))
 
@@ -842,11 +847,20 @@ def fmt_ton(v):
     return f"{float(v):.9f}".rstrip("0").rstrip(".")
 
 
+def parse_ton_price(text):
+    """يحوّل نص إلى سعر TON صالح أو None."""
+    try:
+        v = float(text.strip().translate(AR_DIGITS).replace(",", ".").replace(" ", ""))
+    except ValueError:
+        return None
+    return v if 0 < v <= 1000000 else None
+
+
 def order_text(o, lang=None):
-    name = o.get("product_name") or PRODUCT_NAME
+    name = o.get("product_name") or T("unknown_product", lang)
     uname = f"@{esc(o['username'])}" if o.get("username") else "—"
     t = (
-        T("ot_head", lang, id=o["id"], status=esc(o["status"])) + "\n"
+        T("ot_head", lang, id=o["id"], status=esc(status_label(o["status"], lang))) + "\n"
         f"🛍 {esc(name)}\n"
         f"👤 {esc(o['full_name'])} ({uname}) — ID: <code>{o['user_id']}</code>\n"
     )
@@ -864,9 +878,8 @@ def order_text(o, lang=None):
 
 
 def wilaya_keyboard():
-    names = wilaya_names()
     rows, row = [], []
-    for i, name in enumerate(names, start=1):
+    for i, name in enumerate(wilaya_names(), start=1):
         row.append(InlineKeyboardButton(f"{i:02d} {name}", callback_data=f"w_{i}"))
         if len(row) == 3:
             rows.append(row)
@@ -877,12 +890,21 @@ def wilaya_keyboard():
     return InlineKeyboardMarkup(rows)
 
 
-# ───────────────────────── واجهة الزبون ─────────────────────────
+def lang_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(T("lang_btn_ar"), callback_data="setlang_ar"),
+        InlineKeyboardButton(T("lang_btn_en"), callback_data="setlang_en"),
+    ]])
+
+
 def is_admin(update):
     a = shop_admin()
     return bool(update.effective_user) and a != 0 and update.effective_user.id == a
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 6) واجهة الزبون: العرض
+# ═════════════════════════════════════════════════════════════════════════════
 async def show_list(message, prods):
     rows = []
     for p in prods:
@@ -976,13 +998,6 @@ async def list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── اللغة ──
-def lang_keyboard():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🇩🇿 العربية", callback_data="setlang_ar"),
-        InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en"),
-    ]])
-
-
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
@@ -1007,7 +1022,9 @@ async def lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_home(q.message, q.from_user.id)
 
 
-# ───────────────────────── خطوات الطلب ─────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# 7) واجهة الزبون: خطوات الطلب
+# ═════════════════════════════════════════════════════════════════════════════
 async def send_summary(message, context):
     d = context.user_data
     p = get_product(d["pid"])
@@ -1039,9 +1056,6 @@ async def ask_extra_or_summary(message, context, p):
         return EXTRA
     await send_summary(message, context)
     return CONFIRM
-
-
-AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
 
 async def got_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1112,7 +1126,7 @@ async def got_wilaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     idx = int(q.data.split("_")[1])
     # نخزّن الاسمين (عربي / English) ليقرأها الأدمن بأي لغة
-    context.user_data["wilaya"] = f"{idx:02d} - {WILAYAS[idx - 1]} / {WILAYAS_EN[idx - 1]}"
+    context.user_data["wilaya"] = f"{idx:02d} - {WILAYAS['ar'][idx - 1]} / {WILAYAS['en'][idx - 1]}"
     await q.message.edit_text(T("wilaya_chosen", w=esc(wilaya_names()[idx - 1])))
     return ADDRESS
 
@@ -1135,6 +1149,37 @@ async def restart_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     await q.message.reply_text(T("pick_wilaya"), reply_markup=wilaya_keyboard())
     return WILAYA
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(T("cancelled"), reply_markup=ReplyKeyboardRemove())
+    else:
+        await update.message.reply_text(T("cancelled"), reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 8) الدفع (نجوم + TON)
+# ═════════════════════════════════════════════════════════════════════════════
+TON_TASKS = set()
+
+
+def ton_memo(oid):
+    return f"order_{oid}"
+
+
+def to_nano(ton):
+    return int(round(float(ton) * 1_000_000_000))
+
+
+def parse_order_id(payload):
+    try:
+        return int(payload.split("_")[1])
+    except Exception:
+        return None
 
 
 async def _pay(update: Update, context: ContextTypes.DEFAULT_TYPE, method):
@@ -1186,9 +1231,7 @@ async def _pay(update: Update, context: ContextTypes.DEFAULT_TYPE, method):
         return ConversationHandler.END
 
     await q.message.reply_text(T("reserved", m=RESERVE_MINUTES))
-    desc = (p["description"] or p["name"])
-    if p["shipping"]:
-        desc = T("invoice_ship_desc", name=p["name"])
+    desc = T("invoice_ship_desc", name=p["name"]) if p["shipping"] else (p["description"] or p["name"])
     await context.bot.send_invoice(
         chat_id=q.message.chat_id,
         title=p["name"][:32],
@@ -1207,24 +1250,6 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def payton_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _pay(update, context, "ton")
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.reply_text(T("cancelled"), reply_markup=ReplyKeyboardRemove())
-    else:
-        await update.message.reply_text(T("cancelled"), reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
-
-
-# ───────────────────────── الدفع ─────────────────────────
-def parse_order_id(payload):
-    try:
-        return int(payload.split("_")[1])
-    except Exception:
-        return None
 
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1317,18 +1342,7 @@ async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await finalize_paid(context, uid, oid, status, order, charge, stars=True)
 
 
-# ───────────────────────── الدفع بعملة TON ─────────────────────────
-TON_TASKS = set()
-
-
-def ton_memo(oid):
-    return f"order_{oid}"
-
-
-def to_nano(ton):
-    return int(round(float(ton) * 1_000_000_000))
-
-
+# ── TON: التحقق من التحويلات ──
 async def find_ton_payment(wallet, oid, min_nano, since):
     """يبحث في آخر معاملات المحفظة عن تحويل بنفس التعليق وبمبلغ كافٍ. يرجع الهاش أو None."""
     if not wallet or not min_nano:
@@ -1410,6 +1424,26 @@ async def ton_check_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await settle_ton(context, o, h)
 
 
+async def user_says_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الزبون كتب «دفعت» ← نتحقق من آخر طلب TON معلّق له."""
+    with cursor() as cur:
+        cur.execute(
+            "SELECT * FROM shop_orders WHERE shop_id=? AND user_id=? AND status='pending' "
+            "AND ton_nano IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (shop_id(), update.effective_user.id),
+        )
+        o = cur.fetchone()
+    if not o:
+        await update.message.reply_text(T("ton_no_pending"))
+        return
+    h = await find_ton_payment(get_wallet(), o["id"], o.get("ton_nano"), o.get("created_at"))
+    if not h:
+        await update.message.reply_text(T("ton_not_found"))
+        return
+    await settle_ton(context, o, h)
+
+
+# ── TON: محفظة المتجر (أدمن) ──
 async def cmd_setwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return ConversationHandler.END
@@ -1447,35 +1481,15 @@ async def got_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-PAID_RE = re.compile(r"(دفعت|حولت|حوّلت|تم الدفع|تم التحويل|paid|sent|transferred|done)", re.I)
-
-
-async def user_says_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الزبون كتب «دفعت» ← نتحقق من آخر طلب TON معلّق له."""
-    with cursor() as cur:
-        cur.execute(
-            "SELECT * FROM shop_orders WHERE shop_id=? AND user_id=? AND status='pending' "
-            "AND ton_nano IS NOT NULL ORDER BY id DESC LIMIT 1",
-            (shop_id(), update.effective_user.id),
-        )
-        o = cur.fetchone()
-    if not o:
-        await update.message.reply_text(T("ton_no_pending"))
-        return
-    h = await find_ton_payment(get_wallet(), o["id"], o.get("ton_nano"), o.get("created_at"))
-    if not h:
-        await update.message.reply_text(T("ton_not_found"))
-        return
-    await settle_ton(context, o, h)
-
-
-# ───────────────────────── لوحة الأدمن: المنتجات ─────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# 9) لوحة الأدمن: المنتجات
+# ═════════════════════════════════════════════════════════════════════════════
 def adm(context):
     return context.user_data.setdefault("adm", {})
 
 
 def panel_text(p):
-    n = len(get_photos(p["id"]))
+    n = count_media(p["id"])
     t = (
         f"🗂 <b>{esc(p['name'])}</b>  (#{p['id']})\n\n"
         f"{T('pt_type_ship') if p['shipping'] else T('pt_type_dig')}\n"
@@ -1553,10 +1567,9 @@ async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def adm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أزرار الأدمن خارج المحادثات (فتح اللوحة، تبديل، حذف...)."""
     q = update.callback_query
-    if not is_admin(update):
-        await q.answer()
-        return
     await q.answer()
+    if not is_admin(update):
+        return
     parts = q.data.split("_")  # adm_<action>_<pid>
     action, pid = parts[1], int(parts[2])
     p = get_product(pid)
@@ -1649,10 +1662,7 @@ async def got_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     ship = 1 if q.data == "nt_ship" else 0
     adm(context)["shipping"] = ship
-    if ship:
-        await q.message.reply_text(T("ask_stock_ship"))
-    else:
-        await q.message.reply_text(T("ask_stock_dig"))
+    await q.message.reply_text(T("ask_stock_ship" if ship else "ask_stock_dig"))
     return A_STOCK
 
 
@@ -1680,12 +1690,8 @@ async def got_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def got_ton(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = update.message.text.strip().translate(AR_DIGITS).replace(",", ".").replace(" ", "")
-    try:
-        v = float(t)
-    except ValueError:
-        v = 0
-    if not (0 < v <= 1000000):
+    v = parse_ton_price(update.message.text)
+    if v is None:
         await update.message.reply_text(T("bad_ton"))
         return A_TON
     adm(context)["price_ton"] = v
@@ -1720,7 +1726,7 @@ async def got_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = a["pid"]
     if a.pop("replace", False):
         clear_photos(pid)
-    n = len(get_photos(pid))
+    n = count_media(pid)
     if n >= MAX_PHOTOS:
         await update.message.reply_text(T("media_max", n=MAX_PHOTOS))
         return A_PHOTOS
@@ -1751,15 +1757,11 @@ async def finish_admin(update, context):
     return ConversationHandler.END
 
 
-async def ask_delivery(message):
-    await message.reply_text(T("ask_delivery"))
-
-
 async def photos_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = adm(context)
     p = get_product(a["pid"])
     if a.get("mode") == "new" and p and not p["shipping"]:
-        await ask_delivery(update.message)
+        await update.message.reply_text(T("ask_delivery"))
         return A_DELIV
     return await finish_admin(update, context)
 
@@ -1798,7 +1800,7 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(T("photos_replace", n=MAX_PHOTOS))
         return A_PHOTOS
     if field == "deliv":
-        await ask_delivery(q.message)
+        await q.message.reply_text(T("ask_delivery"))
         return A_DELIV
     if field == "extra":
         await q.message.reply_text(T("x_ask"))
@@ -1832,11 +1834,8 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if t == "-":
             update_product(pid, price_ton=None)
         else:
-            try:
-                v = float(t.translate(AR_DIGITS).replace(",", ".").replace(" ", ""))
-            except ValueError:
-                v = 0
-            if not (0 < v <= 1000000):
+            v = parse_ton_price(t)
+            if v is None:
                 await update.message.reply_text(T("bad_ton"))
                 return E_VALUE
             update_product(pid, price_ton=v)
@@ -1853,6 +1852,7 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ── حقل الزبون المخصص ──
 async def got_x_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = adm(context)
     t = update.message.text.strip()
@@ -1899,7 +1899,9 @@ async def adm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ───────────────────────── أوامر الأدمن: الطلبات ─────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# 10) أوامر الأدمن: الطلبات والمساعدة
+# ═════════════════════════════════════════════════════════════════════════════
 async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
@@ -1925,9 +1927,7 @@ async def cmd_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(T("shipped_ok", id=o["id"]))
     if o.get("wilaya"):
         try:
-            # رسالة الزبون بلغته هو
-            await context.bot.send_message(
-                o["user_id"], T("shipped_user", id=o["id"]))
+            await context.bot.send_message(o["user_id"], T("shipped_user", id=o["id"]))
         except Exception:
             pass
 
@@ -1956,8 +1956,7 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_order(o["id"], "refunded")
     await update.message.reply_text(T("refund_ok", amount=o["amount"], id=o["id"]))
     try:
-        await context.bot.send_message(
-            o["user_id"], T("refunded_user", id=o["id"]))
+        await context.bot.send_message(o["user_id"], T("refunded_user", id=o["id"]))
     except Exception:
         pass
 
@@ -1971,7 +1970,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(t)
 
 
-# ───────────────────────── إدارة البوتات المتعددة (البوت الرئيسي فقط) ─────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# 11) إدارة البوتات المتعددة (البوت الرئيسي فقط)
+# ═════════════════════════════════════════════════════════════════════════════
 async def got_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """الأدمن يرسل توكن بوت جديد ← يُتحقق منه ويُحفظ ويُشغَّل."""
     if shop_id() != 0 or not is_admin(update):
@@ -2056,64 +2057,6 @@ async def cmd_delbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(T("delbot_ok", u=esc(r["username"])))
 
 
-async def bind_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعمل أولاً مع كل تحديث: يحدد المتجر ولغة المستخدم."""
-    shop = context.application.bot_data["shop"]
-    _shop.set(shop)
-    _lang.set(get_shop_lang(shop["id"]))
-
-
-async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
-    log.error("Unhandled error", exc_info=context.error)
-
-
-def admin_commands(lang, is_main):
-    cmds = [
-        BotCommand("addproduct", T("cmd_addproduct", lang)),
-        BotCommand("products", T("cmd_products", lang)),
-        BotCommand("orders", T("cmd_orders", lang)),
-        BotCommand("shipped", T("cmd_shipped", lang)),
-        BotCommand("refund", T("cmd_refund", lang)),
-        BotCommand("setwallet", T("cmd_setwallet", lang)),
-        BotCommand("help", T("cmd_help", lang)),
-        BotCommand("lang", T("cmd_lang", lang)),
-        BotCommand("start", T("cmd_start", lang)),
-    ]
-    if is_main:
-        cmds += [
-            BotCommand("bots", T("cmd_bots", lang)),
-            BotCommand("delbot", T("cmd_delbot", lang)),
-        ]
-    return cmds
-
-
-async def set_admin_commands(bot, admin_id, sid):
-    if not admin_id:
-        return
-    try:
-        lang = get_shop_lang(sid)
-        await bot.set_my_commands(admin_commands(lang, sid == 0), scope=BotCommandScopeChat(admin_id))
-    except Exception as e:
-        log.warning("admin set_my_commands failed: %s", e)
-
-
-def user_commands(lang):
-    return [BotCommand("start", T("cmd_start", lang))]
-
-
-async def setup_commands(bot, admin_id, sid):
-    try:
-        lang = get_shop_lang(sid)
-        cmds = user_commands(lang)
-        await bot.set_my_commands(cmds, scope=BotCommandScopeDefault())
-        for lg in LANGS:  # نفس اللغة للجميع مهما كانت لغة هاتفهم
-            await bot.set_my_commands(cmds, scope=BotCommandScopeDefault(), language_code=lg)
-    except Exception as e:
-        log.warning("default set_my_commands failed: %s", e)
-    await set_admin_commands(bot, admin_id, sid)
-
-
-# ───────────────────────── تشغيل البوتات الفرعية ─────────────────────────
 async def start_shop(token, shop):
     app = build_app(token, shop, is_main=False)
     await app.initialize()
@@ -2146,6 +2089,66 @@ async def load_shops():
             log.error("failed to start shop bot %s: %s", r["bot_id"], e)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 12) قوائم الأوامر + التشغيل
+# ═════════════════════════════════════════════════════════════════════════════
+def admin_commands(lang, is_main):
+    cmds = [
+        BotCommand("addproduct", T("cmd_addproduct", lang)),
+        BotCommand("products", T("cmd_products", lang)),
+        BotCommand("orders", T("cmd_orders", lang)),
+        BotCommand("shipped", T("cmd_shipped", lang)),
+        BotCommand("refund", T("cmd_refund", lang)),
+        BotCommand("setwallet", T("cmd_setwallet", lang)),
+        BotCommand("help", T("cmd_help", lang)),
+        BotCommand("lang", T("cmd_lang", lang)),
+        BotCommand("start", T("cmd_start", lang)),
+    ]
+    if is_main:
+        cmds += [
+            BotCommand("bots", T("cmd_bots", lang)),
+            BotCommand("delbot", T("cmd_delbot", lang)),
+        ]
+    return cmds
+
+
+def user_commands(lang):
+    return [BotCommand("start", T("cmd_start", lang))]
+
+
+async def set_admin_commands(bot, admin_id, sid):
+    if not admin_id:
+        return
+    try:
+        lang = get_shop_lang(sid)
+        await bot.set_my_commands(admin_commands(lang, sid == 0), scope=BotCommandScopeChat(admin_id))
+    except Exception as e:
+        log.warning("admin set_my_commands failed: %s", e)
+
+
+async def setup_commands(bot, admin_id, sid):
+    try:
+        lang = get_shop_lang(sid)
+        cmds = user_commands(lang)
+        await bot.set_my_commands(cmds, scope=BotCommandScopeDefault())
+        for lg in LANGS:  # نفس اللغة للجميع مهما كانت لغة هاتفهم
+            await bot.set_my_commands(cmds, scope=BotCommandScopeDefault(), language_code=lg)
+    except Exception as e:
+        log.warning("default set_my_commands failed: %s", e)
+    await set_admin_commands(bot, admin_id, sid)
+
+
+async def bind_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعمل أولاً مع كل تحديث: يحدد المتجر ولغة المستخدم."""
+    shop = context.application.bot_data["shop"]
+    _shop.set(shop)
+    _lang.set(get_shop_lang(shop["id"]))
+
+
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled error", exc_info=context.error)
+
+
 async def post_init(app: Application):
     await setup_commands(app.bot, ADMIN_ID, 0)
     await load_shops()
@@ -2173,7 +2176,6 @@ async def post_shutdown(app: Application):
         await stop_shop(bid)
 
 
-# ───────────────────────── تسجيل الـ Handlers ─────────────────────────
 def register_handlers(app: Application, is_main: bool):
     text_only = filters.TEXT & ~filters.COMMAND
 
@@ -2223,7 +2225,7 @@ def register_handlers(app: Application, is_main: bool):
         allow_reentry=True,
     )
 
-    conv = ConversationHandler(
+    order_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(buy_cb, pattern=r"^buy_\d+$")],
         states={
             PHONE: [
@@ -2248,17 +2250,22 @@ def register_handlers(app: Application, is_main: bool):
     )
 
     app.add_handler(admin_conv)
-    app.add_handler(conv)
+    app.add_handler(order_conv)
+
+    # الزبون
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("lang", cmd_lang))
-    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^setlang_(ar|en)$"))
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(list_cb, pattern=r"^list$"))
+
+    # الدفع
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
     app.add_handler(CallbackQueryHandler(ton_check_cb, pattern=r"^tonchk_\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(PAID_RE), user_says_paid))
 
+    # الأدمن
+    app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^setlang_(ar|en)$"))
     app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
     app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|clrphotos|del|delyes)_\d+$"))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -2286,7 +2293,6 @@ def build_app(token, shop, is_main=False):
     return app
 
 
-# ───────────────────────── تشغيل ─────────────────────────
 def main():
     init_db()
     app = build_app(BOT_TOKEN, {"id": 0, "admin": ADMIN_ID, "username": None}, is_main=True)
