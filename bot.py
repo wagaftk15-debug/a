@@ -46,6 +46,7 @@ TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
 
 RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
+MAX_EXTRA_LEN = 100   # أقصى طول يمكن للأدمن تحديده لحقل الزبون
 
 # اللغة الافتراضية: ar أو en
 LANGS = ("ar", "en")
@@ -58,6 +59,7 @@ PHONE, WILAYA, ADDRESS, CONFIRM, EXTRA = range(5)
 # حالات محادثة الأدمن
 A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE, X_LABEL, X_TYPE = range(20, 30)
 W_ADDR, A_TON, A_METHOD = 30, 31, 32
+X_LEN, X_PRE, X_SUF = 33, 34, 35
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
@@ -149,6 +151,14 @@ _S = [
     ("cancel_hint", "(للإلغاء: /cancel)", "(to cancel: /cancel)"),
     ("extra_bad_num", "⚠️ أرسل أرقاماً فقط (بدون حروف أو رموز).", "⚠️ Send digits only (no letters or symbols)."),
     ("extra_bad_text", "⚠️ اكتب نصاً من 1 إلى 300 حرف.", "⚠️ Write text between 1 and 300 characters."),
+    ("extra_bad_len", "⚠️ يجب أن يكون الطول <b>{n}</b> بالضبط (أرسلت {got}).",
+     "⚠️ The length must be exactly <b>{n}</b> (you sent {got})."),
+    ("extra_bad_pre", "⚠️ يجب أن يبدأ بـ <code>{v}</code>.", "⚠️ It must start with <code>{v}</code>."),
+    ("extra_bad_suf", "⚠️ يجب أن ينتهي بـ <code>{v}</code>.", "⚠️ It must end with <code>{v}</code>."),
+    ("rule_len_num", "📏 الطول: {n} رقماً", "📏 Length: {n} digits"),
+    ("rule_len_text", "📏 الطول: {n} حرفاً", "📏 Length: {n} characters"),
+    ("rule_pre", "▶️ يبدأ بـ: <code>{v}</code>", "▶️ Starts with: <code>{v}</code>"),
+    ("rule_suf", "⏹ ينتهي بـ: <code>{v}</code>", "⏹ Ends with: <code>{v}</code>"),
     ("session_expired", "انتهت الجلسة، اكتب /start للبدء من جديد.", "Session expired. Send /start to begin again."),
     ("reserved", "⏳ تم حجز طلبك لمدة {m} دقائق. أكمل الدفع من الفاتورة أدناه 👇",
      "⏳ Your order is reserved for {m} minutes. Complete the payment using the invoice below 👇"),
@@ -322,6 +332,20 @@ _S = [
     ("b_x_text", "🔤 نص حر", "🔤 Free text"),
     ("x_type_ask", "ما <b>نوع الإجابة</b> المطلوبة من الزبون؟", "What <b>type of answer</b> do you want from the customer?"),
     ("x_saved", "✅ تم حفظ الحقل. سيُطلب من الزبون قبل الدفع.", "✅ Field saved. It will be requested from the customer before payment."),
+    ("x_len_ask",
+     "📏 كم يجب أن يكون <b>الطول الإجمالي</b> للإجابة (عدد الخانات)؟\nمثال: <code>20</code>\n(الطول يشمل البداية والنهاية إن حددتهما)\n\nأرسل <b>-</b> إن لم ترد تحديد طول.",
+     "📏 What must the <b>total length</b> of the answer be (number of characters)?\nExample: <code>20</code>\n(The length includes the start/end values if you set them)\n\nSend <b>-</b> for no length rule."),
+    ("x_len_bad", "⚠️ اكتب رقماً من 1 إلى {max}، أو - للتخطي.", "⚠️ Enter a number from 1 to {max}, or - to skip."),
+    ("x_pre_ask",
+     "▶️ هل يجب أن <b>تبدأ</b> الإجابة بقيمة معينة؟\nمثال: <code>77</code>\n\nأرسل <b>-</b> للتخطي.",
+     "▶️ Must the answer <b>start</b> with a specific value?\nExample: <code>77</code>\n\nSend <b>-</b> to skip."),
+    ("x_suf_ask",
+     "⏹ هل يجب أن <b>تنتهي</b> الإجابة بقيمة معينة؟\nمثال: <code>99</code>\n\nأرسل <b>-</b> للتخطي.",
+     "⏹ Must the answer <b>end</b> with a specific value?\nExample: <code>99</code>\n\nSend <b>-</b> to skip."),
+    ("x_digits_only", "⚠️ هذا الحقل رقمي، اكتب أرقاماً فقط (أو - للتخطي).",
+     "⚠️ This field is numeric, send digits only (or - to skip)."),
+    ("x_rules_long", "⚠️ البداية/النهاية أطول من الطول المحدد ({n}). أعد المحاولة.",
+     "⚠️ The start/end values are longer than the set length ({n}). Try again."),
 
     # ── الطلبات ──
     ("no_orders", "لا توجد طلبات مدفوعة بعد.", "No paid orders yet."),
@@ -569,6 +593,10 @@ def init_db():
     ensure_column("shop_products", "extra_type", "TEXT")
     ensure_column("shop_orders", "extra_label", "TEXT")
     ensure_column("shop_orders", "extra_value", "TEXT")
+    # قواعد الحقل المخصص: الطول الإجمالي (0 = بلا تحديد) + بداية + نهاية
+    ensure_column("shop_products", "extra_len", "INT DEFAULT 0")
+    ensure_column("shop_products", "extra_prefix", "TEXT")
+    ensure_column("shop_products", "extra_suffix", "TEXT")
     # الدفع بعملة TON
     ensure_column("shop_products", "price_ton", "DOUBLE PRECISION")
     ensure_column("shop_orders", "ton_nano", "BIGINT")
@@ -650,7 +678,8 @@ def set_wallet(w):
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
 PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active",
-                  "extra_label", "extra_type", "price_ton", "stars_on"}
+                  "extra_label", "extra_type", "extra_len", "extra_prefix", "extra_suffix",
+                  "price_ton", "stars_on"}
 
 
 def add_product(name, desc, price, stock, shipping, active=1):
@@ -903,6 +932,19 @@ def price_label(p):
     return " / ".join(parts) or "—"
 
 
+def extra_rules(p):
+    """قواعد حقل الزبون (طول/بداية/نهاية) كقائمة أسطر جاهزة للعرض (HTML)."""
+    r = []
+    n = p.get("extra_len") or 0
+    if n:
+        r.append(T("rule_len_num" if p.get("extra_type") == "number" else "rule_len_text", n=n))
+    if p.get("extra_prefix"):
+        r.append(T("rule_pre", v=esc(p["extra_prefix"])))
+    if p.get("extra_suffix"):
+        r.append(T("rule_suf", v=esc(p["extra_suffix"])))
+    return r
+
+
 def order_text(o, lang=None):
     name = o.get("product_name") or T("unknown_product", lang)
     uname = f"@{esc(o['username'])}" if o.get("username") else "—"
@@ -1104,7 +1146,12 @@ async def ask_extra_or_summary(message, context, p):
     """يسأل الزبون عن الحقل المخصص (إن وُجد ولم يُجب عنه) وإلا يعرض الملخص."""
     if p.get("extra_label") and "extra" not in context.user_data:
         hint = T("extra_hint_num") if p.get("extra_type") == "number" else T("extra_hint_text")
-        await message.reply_text(f"🧩 {esc(p['extra_label'])}\n{hint}\n\n{T('cancel_hint')}")
+        text = f"🧩 {esc(p['extra_label'])}\n{hint}\n"
+        rules = extra_rules(p)
+        if rules:
+            text += "\n" + "\n".join(rules) + "\n"
+        text += f"\n{T('cancel_hint')}"
+        await message.reply_text(text)
         return EXTRA
     await send_summary(message, context)
     return CONFIRM
@@ -1119,12 +1166,26 @@ async def got_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = update.message.text.strip()
     if p.get("extra_type") == "number":
         t = t.translate(AR_DIGITS).replace(" ", "")
-        if not re.fullmatch(r"\d{1,30}", t):
+        if not re.fullmatch(r"\d{1,%d}" % MAX_EXTRA_LEN, t):
             await update.message.reply_text(T("extra_bad_num"))
             return EXTRA
     elif not (1 <= len(t) <= 300):
         await update.message.reply_text(T("extra_bad_text"))
         return EXTRA
+
+    # قواعد الأدمن: الطول الإجمالي، البداية، النهاية
+    n = p.get("extra_len") or 0
+    if n and len(t) != n:
+        await update.message.reply_text(T("extra_bad_len", n=n, got=len(t)))
+        return EXTRA
+    pre, suf = p.get("extra_prefix"), p.get("extra_suffix")
+    if pre and not t.startswith(pre):
+        await update.message.reply_text(T("extra_bad_pre", v=esc(pre)))
+        return EXTRA
+    if suf and not t.endswith(suf):
+        await update.message.reply_text(T("extra_bad_suf", v=esc(suf)))
+        return EXTRA
+
     d["extra"] = t
     await send_summary(update.message, context)
     return CONFIRM
@@ -1562,6 +1623,8 @@ def panel_text(p):
     if p.get("extra_label"):
         kind = T("kind_num") if p.get("extra_type") == "number" else T("kind_text")
         t += T("pt_extra", label=esc(p["extra_label"]), kind=kind) + "\n"
+        for r in extra_rules(p):
+            t += f"    ↳ {r}\n"
     if not p["shipping"]:
         t += T("pt_deliv", a="✅" if p["delivery_text"] else "❌", b="✅" if p["delivery_file"] else "❌") + "\n"
     if p["description"]:
@@ -1957,7 +2020,8 @@ async def got_x_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = update.message.text.strip()
     if t == "-":
         pid = a["pid"]
-        update_product(pid, extra_label=None, extra_type=None)
+        update_product(pid, extra_label=None, extra_type=None,
+                       extra_len=0, extra_prefix=None, extra_suffix=None)
         context.user_data.pop("adm", None)
         await update.message.reply_text(T("x_removed"))
         await render_panel(update.message, pid)
@@ -1983,10 +2047,89 @@ async def got_x_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = a.get("pid")
     if not pid or not a.get("xlabel"):
         return ConversationHandler.END
-    update_product(pid, extra_label=a["xlabel"], extra_type="number" if q.data == "xt_num" else "text")
+    a["xtype"] = "number" if q.data == "xt_num" else "text"
+    await q.message.reply_text(T("x_len_ask"))
+    return X_LEN
+
+
+def _x_norm(a, t):
+    """يوحّد القيمة: للحقل الرقمي يحوّل الأرقام العربية ويحذف الفراغات."""
+    if a.get("xtype") == "number":
+        return t.translate(AR_DIGITS).replace(" ", "")
+    return t
+
+
+def _x_max_len(a):
+    return MAX_EXTRA_LEN if a.get("xtype") == "number" else 300
+
+
+async def got_x_len(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    t = update.message.text.strip().translate(AR_DIGITS)
+    if t == "-":
+        a["xlen"] = 0
+    else:
+        mx = _x_max_len(a)
+        if not t.isdigit() or not (1 <= int(t) <= mx):
+            await update.message.reply_text(T("x_len_bad", max=mx))
+            return X_LEN
+        a["xlen"] = int(t)
+    await update.message.reply_text(T("x_pre_ask"))
+    return X_PRE
+
+
+async def got_x_pre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    t = update.message.text.strip()
+    if t == "-":
+        a["xpre"] = None
+    else:
+        t = _x_norm(a, t)
+        if a.get("xtype") == "number" and not t.isdigit():
+            await update.message.reply_text(T("x_digits_only"))
+            return X_PRE
+        if not t or len(t) > 100:
+            await update.message.reply_text(T("x_bad_len"))
+            return X_PRE
+        if a.get("xlen") and len(t) > a["xlen"]:
+            await update.message.reply_text(T("x_rules_long", n=a["xlen"]))
+            return X_PRE
+        a["xpre"] = t
+    await update.message.reply_text(T("x_suf_ask"))
+    return X_SUF
+
+
+async def got_x_suf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    pid = a.get("pid")
+    if not pid or not a.get("xlabel"):
+        return ConversationHandler.END
+    t = update.message.text.strip()
+    if t == "-":
+        suf = None
+    else:
+        t = _x_norm(a, t)
+        if a.get("xtype") == "number" and not t.isdigit():
+            await update.message.reply_text(T("x_digits_only"))
+            return X_SUF
+        if not t or len(t) > 100:
+            await update.message.reply_text(T("x_bad_len"))
+            return X_SUF
+        if a.get("xlen") and len(a.get("xpre") or "") + len(t) > a["xlen"]:
+            await update.message.reply_text(T("x_rules_long", n=a["xlen"]))
+            return X_SUF
+        suf = t
+    update_product(
+        pid,
+        extra_label=a["xlabel"],
+        extra_type=a.get("xtype", "text"),
+        extra_len=a.get("xlen") or 0,
+        extra_prefix=a.get("xpre"),
+        extra_suffix=suf,
+    )
     context.user_data.pop("adm", None)
-    await q.message.reply_text(T("x_saved"))
-    await render_panel(q.message, pid)
+    await update.message.reply_text(T("x_saved"))
+    await render_panel(update.message, pid)
     return ConversationHandler.END
 
 
@@ -2314,6 +2457,9 @@ def register_handlers(app: Application, is_main: bool):
             E_VALUE: [MessageHandler(text_only, got_edit_value)],
             X_LABEL: [MessageHandler(text_only, got_x_label)],
             X_TYPE: [CallbackQueryHandler(got_x_type, pattern=r"^xt_(num|text)$")],
+            X_LEN: [MessageHandler(text_only, got_x_len)],
+            X_PRE: [MessageHandler(text_only, got_x_pre)],
+            X_SUF: [MessageHandler(text_only, got_x_suf)],
         },
         fallbacks=[
             CommandHandler("cancel", adm_cancel),
