@@ -1,6 +1,7 @@
 import os
 import re
 import html
+import json
 import time
 import asyncio
 import sqlite3
@@ -46,7 +47,8 @@ TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
 
 RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
-MAX_EXTRA_LEN = 100   # أقصى طول يمكن للأدمن تحديده لحقل الزبون
+MAX_EXTRA_LEN = 100   # أقصى طول يمكن للأدمن تحديده لحقل الزبون الرقمي
+MAX_EXTRAS = 10       # أقصى عدد حقول للمنتج الواحد
 
 # اللغة الافتراضية: ar أو en
 LANGS = ("ar", "en")
@@ -254,7 +256,7 @@ _S = [
     ("pt_media", "📷 الوسائط (صور/فيديو): {n}", "📷 Media (photos/videos): {n}"),
     ("pt_visible", "الحالة: ✅ ظاهر للزبائن", "Status: ✅ Visible to customers"),
     ("pt_hidden", "الحالة: 🚫 مخفي", "Status: 🚫 Hidden"),
-    ("pt_extra", "🧩 حقل الزبون: {label} ({kind})", "🧩 Customer field: {label} ({kind})"),
+    ("pt_extras", "🧩 حقول الزبون ({n}):", "🧩 Customer fields ({n}):"),
     ("kind_num", "🔢 رقم", "🔢 Number"),
     ("kind_text", "🔤 نص", "🔤 Text"),
     ("pt_deliv", "🎁 محتوى التسليم: نص {a} | ملف {b}", "🎁 Delivery content: text {a} | file {b}"),
@@ -267,7 +269,7 @@ _S = [
     ("b_to_dig", "🔁 تحويل إلى رقمي", "🔁 Switch to digital"),
     ("b_to_phys", "🔁 تحويل إلى مادي (شحن)", "🔁 Switch to physical (shipping)"),
     ("b_deliv", "🎁 محتوى التسليم", "🎁 Delivery content"),
-    ("b_extra", "🧩 حقل يرسله الزبون", "🧩 Customer input field"),
+    ("b_extra", "🧩 حقول الزبون ({n})", "🧩 Customer fields ({n})"),
     ("b_hide", "🚫 إخفاء", "🚫 Hide"),
     ("b_show", "✅ إظهار", "✅ Show"),
     ("b_del", "❌ حذف", "❌ Delete"),
@@ -322,10 +324,29 @@ _S = [
     ("updated", "✅ تم التحديث.", "✅ Updated."),
     ("adm_cancelled", "تم الإلغاء.", "Cancelled."),
 
-    # ── حقل الزبون ──
+    # ── حقول الزبون (متعددة) ──
+    ("x_list_title",
+     "🧩 <b>حقول الزبون</b> — «{name}»\n\nالحقل يُحفظ مرة واحدة ويمكنك استعماله في أي منتج بدون إعادة كتابته.\nاختر حقلاً لإدارته أو أضف حقلاً 👇",
+     "🧩 <b>Customer fields</b> — “{name}”\n\nA field is saved once and can be reused in any product without retyping it.\nPick a field to manage or add one 👇"),
+    ("x_none", "لا توجد حقول في هذا المنتج بعد.", "This product has no fields yet."),
+    ("b_x_add", "➕ إضافة حقل", "➕ Add field"),
+    ("x_pick_title",
+     "➕ اختر <b>حقلاً محفوظاً</b> لإضافته للمنتج «{name}»، أو أنشئ حقلاً جديداً:",
+     "➕ Pick a <b>saved field</b> to add to “{name}”, or create a new one:"),
+    ("x_pick_none", "لا توجد حقول محفوظة أخرى بعد.", "No other saved fields yet."),
+    ("b_x_new", "🆕 إنشاء حقل جديد", "🆕 Create new field"),
+    ("b_x_edit", "✏️ تعديل (يسري على كل المنتجات)", "✏️ Edit (applies to all products)"),
+    ("b_x_unlink", "➖ إزالة من هذا المنتج", "➖ Remove from this product"),
+    ("b_x_kill", "🗑 حذف نهائي من المتجر", "🗑 Delete permanently"),
+    ("b_x_back", "🔙 الحقول", "🔙 Fields"),
+    ("b_x_prod", "🔙 المنتج", "🔙 Product"),
+    ("x_max", "⚠️ الحد الأقصى {n} حقول لكل منتج.", "⚠️ Maximum {n} fields per product."),
+    ("x_field_kind", "النوع: {kind}", "Type: {kind}"),
+    ("x_field_used", "📦 مستعمل في {n} منتج", "📦 Used in {n} product(s)"),
+    ("x_field_norules", "بدون قواعد إضافية", "No extra rules"),
     ("x_ask",
-     "🧩 اكتب <b>السؤال/الطلب الذي سيظهر للزبون</b> قبل الدفع.\nمثال: <i>أرسل رقم حسابك (ID)</i> أو <i>اكتب اسم اللاعب</i>\n\nأرسل <b>-</b> لحذف الحقل.\n(للإلغاء: /cancel)",
-     "🧩 Type the <b>question/request shown to the customer</b> before payment.\nExample: <i>Send your account ID</i> or <i>Type the player name</i>\n\nSend <b>-</b> to remove the field.\n(to cancel: /cancel)"),
+     "🧩 اكتب <b>اسم الحقل / السؤال الذي سيظهر للزبون</b> قبل الدفع.\nمثال: <i>الايدي</i> أو <i>اسم اللاعب</i> أو <i>رقم الحساب</i>\n\n(للإلغاء: /cancel)",
+     "🧩 Type the <b>field name / question shown to the customer</b> before payment.\nExample: <i>Player ID</i> or <i>Account number</i>\n\n(to cancel: /cancel)"),
     ("x_removed", "🗑 تم حذف الحقل.", "🗑 Field removed."),
     ("x_bad_len", "⚠️ اكتب نصاً من 2 إلى 200 حرف.", "⚠️ Enter text of 2 to 200 characters."),
     ("b_x_num", "🔢 رقم فقط", "🔢 Numbers only"),
@@ -357,8 +378,8 @@ _S = [
     ("refund_fail", "فشل الاسترجاع: {err}", "Refund failed: {err}"),
     ("refund_ok", "💸 تم استرجاع {amount}⭐ للطلب #{id}.", "💸 Refunded {amount}⭐ for order #{id}."),
     ("help_admin",
-     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقل الزبون، سعر TON، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير لغة المتجر للجميع",
-     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer field, TON price, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change the shop language (for everyone)"),
+     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقول الزبون، سعر TON، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير لغة المتجر للجميع",
+     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer fields, TON price, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change the shop language (for everyone)"),
     ("help_multi",
      "\n\n🤖 <b>البوتات المتعددة</b>\nأرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n/bots — البوتات المرتبطة\n/delbot ID — فصل بوت وإيقافه",
      "\n\n🤖 <b>Multiple bots</b>\nSend a <b>new bot token</b> (from @BotFather) here to link and start it right away.\n/bots — linked bots\n/delbot ID — unlink and stop a bot"),
@@ -579,6 +600,37 @@ def init_db():
                 created_at BIGINT
             )
         """)
+        # مكتبة حقول الزبون: تُعرَّف مرة واحدة وتُربط بأي منتج
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS shop_fields (
+                id {pk},
+                shop_id BIGINT NOT NULL DEFAULT 0,
+                label TEXT NOT NULL,
+                kind TEXT DEFAULT 'text',
+                flen INT DEFAULT 0,
+                prefix TEXT,
+                suffix TEXT
+            )
+        """)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS shop_product_fields (
+                id {pk},
+                product_id INT NOT NULL,
+                field_id INT NOT NULL
+            )
+        """)
+        # (جدول قديم من الإصدار السابق، يُستعمل فقط للترحيل)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS shop_extras (
+                id {pk},
+                product_id INT NOT NULL,
+                label TEXT NOT NULL,
+                kind TEXT DEFAULT 'text',
+                flen INT DEFAULT 0,
+                prefix TEXT,
+                suffix TEXT
+            )
+        """)
 
     # ترحيل الأعمدة (للقواعد القديمة)
     ensure_column("shop_orders", "product_id", "INT")
@@ -588,15 +640,16 @@ def init_db():
     # الصفوف القديمة تأخذ 0 = البوت الرئيسي
     ensure_column("shop_products", "shop_id", "BIGINT DEFAULT 0")
     ensure_column("shop_orders", "shop_id", "BIGINT DEFAULT 0")
-    # الحقل المخصص (يرسله الزبون: رقم أو نص)
+    # أعمدة الحقل المخصص القديم (تبقى للتوافق مع الطلبات والمنتجات القديمة)
     ensure_column("shop_products", "extra_label", "TEXT")
     ensure_column("shop_products", "extra_type", "TEXT")
     ensure_column("shop_orders", "extra_label", "TEXT")
     ensure_column("shop_orders", "extra_value", "TEXT")
-    # قواعد الحقل المخصص: الطول الإجمالي (0 = بلا تحديد) + بداية + نهاية
     ensure_column("shop_products", "extra_len", "INT DEFAULT 0")
     ensure_column("shop_products", "extra_prefix", "TEXT")
     ensure_column("shop_products", "extra_suffix", "TEXT")
+    # الحقول المتعددة: قيم الزبون كـ JSON داخل الطلب
+    ensure_column("shop_orders", "extras_json", "TEXT")
     # الدفع بعملة TON
     ensure_column("shop_products", "price_ton", "DOUBLE PRECISION")
     ensure_column("shop_orders", "ton_nano", "BIGINT")
@@ -617,7 +670,48 @@ def init_db():
                         f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
                     )
 
+    migrate_legacy_extras()
     log.info("DB ready (%s)", "PostgreSQL" if USE_PG else "SQLite")
+
+
+def migrate_legacy_extras():
+    """ينقل الحقول القديمة إلى المكتبة الجديدة مرة واحدة (ويدمج الحقول المتطابقة في حقل واحد)."""
+    try:
+        if _load_setting("extras_v2"):
+            return
+        cache, n = {}, 0
+
+        def field_for(cur, sid, label, kind, flen, prefix, suffix):
+            key = (sid, label, kind, flen or 0, prefix, suffix)
+            if key not in cache:
+                cache[key] = _insert_field(cur, sid, label, kind, flen, prefix, suffix)
+            return cache[key]
+
+        with cursor() as cur:
+            cur.execute("SELECT e.*, p.shop_id AS sid FROM shop_extras e "
+                        "JOIN shop_products p ON p.id = e.product_id ORDER BY e.id")
+            rows = cur.fetchall()
+            for r in rows:
+                fid = field_for(cur, r.get("sid") or 0, r["label"], r.get("kind") or "text",
+                                r.get("flen"), r.get("prefix"), r.get("suffix"))
+                cur.execute("INSERT INTO shop_product_fields (product_id, field_id) VALUES (?,?)",
+                            (r["product_id"], fid))
+                n += 1
+            cur.execute("SELECT * FROM shop_products WHERE extra_label IS NOT NULL AND extra_label <> ''")
+            olds = cur.fetchall()
+            for p in olds:
+                fid = field_for(cur, p.get("shop_id") or 0, p["extra_label"], p.get("extra_type") or "text",
+                                p.get("extra_len"), p.get("extra_prefix"), p.get("extra_suffix"))
+                cur.execute("INSERT INTO shop_product_fields (product_id, field_id) VALUES (?,?)",
+                            (p["id"], fid))
+                cur.execute("UPDATE shop_products SET extra_label=NULL, extra_type=NULL, extra_len=0, "
+                            "extra_prefix=NULL, extra_suffix=NULL WHERE id=?", (p["id"],))
+                n += 1
+        _save_setting("extras_v2", "1")
+        if n:
+            log.info("Migrated %d customer fields to the library", n)
+    except Exception as e:
+        log.warning("extras migration failed: %s", e)
 
 
 # ── الإعدادات: لغة المتجر ──
@@ -678,7 +772,6 @@ def set_wallet(w):
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
 PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active",
-                  "extra_label", "extra_type", "extra_len", "extra_prefix", "extra_suffix",
                   "price_ton", "stars_on"}
 
 
@@ -721,6 +814,10 @@ def delete_product(pid):
             "DELETE FROM shop_photos WHERE product_id IN (SELECT id FROM shop_products WHERE id=? AND shop_id=?)",
             (pid, shop_id()),
         )
+        cur.execute(
+            "DELETE FROM shop_product_fields WHERE product_id IN (SELECT id FROM shop_products WHERE id=? AND shop_id=?)",
+            (pid, shop_id()),
+        )
         cur.execute("DELETE FROM shop_products WHERE id=? AND shop_id=?", (pid, shop_id()))
 
 
@@ -743,6 +840,83 @@ def add_photo(pid, file_id, kind="photo"):
 def clear_photos(pid):
     with cursor() as cur:
         cur.execute("DELETE FROM shop_photos WHERE product_id=?", (pid,))
+
+
+# ── حقول الزبون: مكتبة محفوظة تُربط بأي منتج ──
+def _insert_field(cur, sid, label, kind, flen, prefix, suffix):
+    cur.execute("""
+        INSERT INTO shop_fields (shop_id, label, kind, flen, prefix, suffix)
+        VALUES (?,?,?,?,?,?) RETURNING id
+    """, (sid, label, kind, flen or 0, prefix, suffix))
+    return cur.fetchone()["id"]
+
+
+def list_extras(pid):
+    """الحقول المربوطة بالمنتج بالترتيب."""
+    with cursor() as cur:
+        cur.execute("""
+            SELECT f.* FROM shop_fields f
+            JOIN shop_product_fields l ON l.field_id = f.id
+            WHERE l.product_id=? AND f.shop_id=? ORDER BY l.id
+        """, (pid, shop_id()))
+        return cur.fetchall()
+
+
+def list_library():
+    """كل الحقول المحفوظة في هذا المتجر."""
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_fields WHERE shop_id=? ORDER BY id", (shop_id(),))
+        return cur.fetchall()
+
+
+def get_extra(fid):
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_fields WHERE id=? AND shop_id=?", (fid, shop_id()))
+        return cur.fetchone()
+
+
+def add_extra(label, kind, flen, prefix, suffix):
+    with cursor() as cur:
+        return _insert_field(cur, shop_id(), label, kind, flen, prefix, suffix)
+
+
+def update_extra(fid, label, kind, flen, prefix, suffix):
+    with cursor() as cur:
+        cur.execute("""
+            UPDATE shop_fields SET label=?, kind=?, flen=?, prefix=?, suffix=?
+            WHERE id=? AND shop_id=?
+        """, (label, kind, flen or 0, prefix, suffix, fid, shop_id()))
+
+
+def attach_extra(pid, fid):
+    if not get_product(pid) or not get_extra(fid):
+        return False
+    with cursor() as cur:
+        cur.execute("SELECT id FROM shop_product_fields WHERE product_id=? AND field_id=?", (pid, fid))
+        if not cur.fetchone():
+            cur.execute("INSERT INTO shop_product_fields (product_id, field_id) VALUES (?,?)", (pid, fid))
+    return True
+
+
+def detach_extra(pid, fid):
+    if not get_product(pid):
+        return
+    with cursor() as cur:
+        cur.execute("DELETE FROM shop_product_fields WHERE product_id=? AND field_id=?", (pid, fid))
+
+
+def delete_extra(fid):
+    if not get_extra(fid):
+        return
+    with cursor() as cur:
+        cur.execute("DELETE FROM shop_product_fields WHERE field_id=?", (fid,))
+        cur.execute("DELETE FROM shop_fields WHERE id=? AND shop_id=?", (fid, shop_id()))
+
+
+def field_usage(fid):
+    with cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM shop_product_fields WHERE field_id=?", (fid,))
+        return cur.fetchone()["n"]
 
 
 # ── المخزون والحجز (الحجز = طلبات pending لم تنتهِ مهلتها) ──
@@ -773,8 +947,9 @@ def availability(pid, uid):
 
 
 # ── الطلبات ──
-def place_order(user, pid, phone, wilaya, address, extra=None):
-    """ينشئ الطلب ويحجز القطعة. returns (order_id, 'ok') أو (None, 'sold'/'held')"""
+def place_order(user, pid, phone, wilaya, address, extras=None):
+    """ينشئ الطلب ويحجز القطعة. extras = قائمة [{'label':..,'value':..}].
+    returns (order_id, 'ok') أو (None, 'sold'/'held')"""
     with cursor() as cur:
         p = _lock_product(cur, pid)
         if not p or not p["active"] or p["stock"] == 0:
@@ -786,14 +961,14 @@ def place_order(user, pid, phone, wilaya, address, extra=None):
             (user.id, pid),
         )
         now = int(time.time())
+        extras_json = json.dumps(extras, ensure_ascii=False) if extras else None
         cur.execute("""
             INSERT INTO shop_orders
               (user_id, username, full_name, phone, wilaya, address, amount, created_at,
-               product_id, product_name, reserved_until, shop_id, extra_label, extra_value)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id
+               product_id, product_name, reserved_until, shop_id, extras_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id
         """, (user.id, user.username or "", user.full_name or "", phone, wilaya, address,
-              p["price"], now, pid, p["name"], now + RESERVE_MINUTES * 60, shop_id(),
-              p.get("extra_label") if extra else None, extra))
+              p["price"], now, pid, p["name"], now + RESERVE_MINUTES * 60, shop_id(), extras_json))
         return cur.fetchone()["id"], "ok"
 
 
@@ -932,17 +1107,55 @@ def price_label(p):
     return " / ".join(parts) or "—"
 
 
-def extra_rules(p):
-    """قواعد حقل الزبون (طول/بداية/نهاية) كقائمة أسطر جاهزة للعرض (HTML)."""
+def extra_rules(f):
+    """قواعد حقل واحد (طول/بداية/نهاية) كقائمة أسطر جاهزة للعرض (HTML)."""
     r = []
-    n = p.get("extra_len") or 0
+    n = f.get("flen") or 0
     if n:
-        r.append(T("rule_len_num" if p.get("extra_type") == "number" else "rule_len_text", n=n))
-    if p.get("extra_prefix"):
-        r.append(T("rule_pre", v=esc(p["extra_prefix"])))
-    if p.get("extra_suffix"):
-        r.append(T("rule_suf", v=esc(p["extra_suffix"])))
+        r.append(T("rule_len_num" if f.get("kind") == "number" else "rule_len_text", n=n))
+    if f.get("prefix"):
+        r.append(T("rule_pre", v=esc(f["prefix"])))
+    if f.get("suffix"):
+        r.append(T("rule_suf", v=esc(f["suffix"])))
     return r
+
+
+def kind_label(f):
+    return T("kind_num") if f.get("kind") == "number" else T("kind_text")
+
+
+def check_extra(f, text):
+    """يتحقق من إجابة الزبون لحقل واحد. يرجع (القيمة، None) أو (None، نص الخطأ)."""
+    t = (text or "").strip()
+    if f.get("kind") == "number":
+        t = t.translate(AR_DIGITS).replace(" ", "")
+        if not re.fullmatch(r"\d{1,%d}" % MAX_EXTRA_LEN, t):
+            return None, T("extra_bad_num")
+    elif not (1 <= len(t) <= 300):
+        return None, T("extra_bad_text")
+
+    n = f.get("flen") or 0
+    if n and len(t) != n:
+        return None, T("extra_bad_len", n=n, got=len(t))
+    pre, suf = f.get("prefix"), f.get("suffix")
+    if pre and not t.startswith(pre):
+        return None, T("extra_bad_pre", v=esc(pre))
+    if suf and not t.endswith(suf):
+        return None, T("extra_bad_suf", v=esc(suf))
+    return t, None
+
+
+def order_extras(o):
+    """قيم حقول الطلب كقائمة [{'label','value'}] (تدعم الطلبات القديمة ذات الحقل الواحد)."""
+    items = []
+    if o.get("extras_json"):
+        try:
+            items = json.loads(o["extras_json"]) or []
+        except Exception:
+            items = []
+    if not items and o.get("extra_value"):
+        items = [{"label": o.get("extra_label") or "—", "value": o["extra_value"]}]
+    return items
 
 
 def order_text(o, lang=None):
@@ -957,8 +1170,8 @@ def order_text(o, lang=None):
         t += f"📱 +{esc(o['phone'])}\n📍 {esc(o['wilaya'])}\n🏠 {esc(o['address'])}\n"
     else:
         t += T("ot_digital", lang) + "\n"
-    if o.get("extra_value"):
-        t += f"🧩 {esc(o.get('extra_label') or '—')}: <code>{esc(o['extra_value'])}</code>\n"
+    for x in order_extras(o):
+        t += f"🧩 {esc(x.get('label') or '—')}: <code>{esc(x.get('value'))}</code>\n"
     if str(o.get("charge_id") or "").startswith("ton_"):
         t += f"💎 {fmt_ton((o.get('ton_nano') or 0) / 1e9)} TON\n"
     else:
@@ -1136,18 +1349,23 @@ async def send_summary(message, context):
         text += f"📱 +{esc(d['phone'])}\n📍 {esc(d['wilaya'])}\n🏠 {esc(d['address'])}\n"
     else:
         text += T("digital_note")
-    if p.get("extra_label") and d.get("extra"):
-        text += f"🧩 {esc(p['extra_label'])}: <b>{esc(d['extra'])}</b>\n"
+    for f, v in zip(list_extras(p["id"]), d.get("xvals", [])):
+        text += f"🧩 {esc(f['label'])}: <b>{esc(v)}</b>\n"
     text += T("summary_amount", amount=price_label(p))
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def ask_extra_or_summary(message, context, p):
-    """يسأل الزبون عن الحقل المخصص (إن وُجد ولم يُجب عنه) وإلا يعرض الملخص."""
-    if p.get("extra_label") and "extra" not in context.user_data:
-        hint = T("extra_hint_num") if p.get("extra_type") == "number" else T("extra_hint_text")
-        text = f"🧩 {esc(p['extra_label'])}\n{hint}\n"
-        rules = extra_rules(p)
+    """يسأل الزبون عن حقل الزبون التالي (بالترتيب) وإلا يعرض الملخص."""
+    extras = list_extras(p["id"])
+    done = context.user_data.setdefault("xvals", [])
+    i = len(done)
+    if i < len(extras):
+        f = extras[i]
+        hint = T("extra_hint_num") if f.get("kind") == "number" else T("extra_hint_text")
+        head = f"🧩 ({i + 1}/{len(extras)}) " if len(extras) > 1 else "🧩 "
+        text = f"{head}<b>{esc(f['label'])}</b>\n{hint}\n"
+        rules = extra_rules(f)
         if rules:
             text += "\n" + "\n".join(rules) + "\n"
         text += f"\n{T('cancel_hint')}"
@@ -1160,35 +1378,22 @@ async def ask_extra_or_summary(message, context, p):
 async def got_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
     p = get_product(d["pid"]) if d.get("pid") else None
-    if not p or not p.get("extra_label"):
+    if not p:
         await update.message.reply_text(T("session_expired"))
         return ConversationHandler.END
-    t = update.message.text.strip()
-    if p.get("extra_type") == "number":
-        t = t.translate(AR_DIGITS).replace(" ", "")
-        if not re.fullmatch(r"\d{1,%d}" % MAX_EXTRA_LEN, t):
-            await update.message.reply_text(T("extra_bad_num"))
-            return EXTRA
-    elif not (1 <= len(t) <= 300):
-        await update.message.reply_text(T("extra_bad_text"))
-        return EXTRA
+    extras = list_extras(p["id"])
+    done = d.setdefault("xvals", [])
+    if len(done) >= len(extras):
+        await send_summary(update.message, context)
+        return CONFIRM
 
-    # قواعد الأدمن: الطول الإجمالي، البداية، النهاية
-    n = p.get("extra_len") or 0
-    if n and len(t) != n:
-        await update.message.reply_text(T("extra_bad_len", n=n, got=len(t)))
+    f = extras[len(done)]
+    val, err = check_extra(f, update.message.text)
+    if err:
+        await update.message.reply_text(err)
         return EXTRA
-    pre, suf = p.get("extra_prefix"), p.get("extra_suffix")
-    if pre and not t.startswith(pre):
-        await update.message.reply_text(T("extra_bad_pre", v=esc(pre)))
-        return EXTRA
-    if suf and not t.endswith(suf):
-        await update.message.reply_text(T("extra_bad_suf", v=esc(suf)))
-        return EXTRA
-
-    d["extra"] = t
-    await send_summary(update.message, context)
-    return CONFIRM
+    done.append(val)
+    return await ask_extra_or_summary(update.message, context, p)
 
 
 async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1205,6 +1410,7 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     context.user_data.clear()
     context.user_data["pid"] = pid
+    context.user_data["xvals"] = []
 
     if not p["shipping"]:  # منتج رقمي: لا هاتف ولا ولاية ولا عنوان
         return await ask_extra_or_summary(q.message, context, p)
@@ -1313,11 +1519,16 @@ async def _pay(update: Update, context: ContextTypes.DEFAULT_TYPE, method):
     if p["shipping"] and not all(k in d for k in ("phone", "wilaya", "address")):
         await q.message.reply_text(T("session_expired"))
         return ConversationHandler.END
-    if p.get("extra_label") and not d.get("extra"):
+
+    # كل حقول الزبون يجب أن تكون مملوءة
+    extras = list_extras(pid)
+    xvals = d.get("xvals", [])
+    if len(xvals) != len(extras):
         await q.message.reply_text(T("session_expired"))
         return ConversationHandler.END
+    pairs = [{"label": f["label"], "value": v} for f, v in zip(extras, xvals)]
 
-    oid, why = place_order(q.from_user, pid, d.get("phone"), d.get("wilaya"), d.get("address"), d.get("extra"))
+    oid, why = place_order(q.from_user, pid, d.get("phone"), d.get("wilaya"), d.get("address"), pairs)
     if not oid:
         await q.message.reply_text(T("unavail_" + (why if why in ("sold", "held") else "sold")))
         return ConversationHandler.END
@@ -1620,11 +1831,13 @@ def panel_text(p):
         f"{T('pt_media', n=n)}\n"
         f"{T('pt_visible') if p['active'] else T('pt_hidden')}\n"
     )
-    if p.get("extra_label"):
-        kind = T("kind_num") if p.get("extra_type") == "number" else T("kind_text")
-        t += T("pt_extra", label=esc(p["extra_label"]), kind=kind) + "\n"
-        for r in extra_rules(p):
-            t += f"    ↳ {r}\n"
+    extras = list_extras(p["id"])
+    if extras:
+        t += T("pt_extras", n=len(extras)) + "\n"
+        for f in extras:
+            t += f"    ↳ <b>{esc(f['label'])}</b> ({kind_label(f)})\n"
+            for r in extra_rules(f):
+                t += f"        • {r}\n"
     if not p["shipping"]:
         t += T("pt_deliv", a="✅" if p["delivery_text"] else "❌", b="✅" if p["delivery_file"] else "❌") + "\n"
     if p["description"]:
@@ -1650,7 +1863,7 @@ def panel_markup(p):
                      B(T("b_off_ton"), callback_data=f"adm_offton_{i}")])
     if not p["shipping"]:
         rows.append([B(T("b_deliv"), callback_data=f"edt_deliv_{i}")])
-    rows.append([B(T("b_extra"), callback_data=f"edt_extra_{i}")])
+    rows.append([B(T("b_extra", n=len(list_extras(i))), callback_data=f"xl_{i}")])
     rows.append([B(T("b_hide") if p["active"] else T("b_show"), callback_data=f"adm_active_{i}"),
                  B(T("b_del"), callback_data=f"adm_del_{i}")])
     rows.append([B(T("b_back"), callback_data="adm_list")])
@@ -1957,9 +2170,6 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if field == "deliv":
         await q.message.reply_text(T("ask_delivery"))
         return A_DELIV
-    if field == "extra":
-        await q.message.reply_text(T("x_ask"))
-        return X_LABEL
     await q.message.reply_text(T("ep_" + field) + "\n" + T("cancel_hint"))
     return E_VALUE
 
@@ -2014,18 +2224,144 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── حقل الزبون المخصص ──
+# ── حقول الزبون (لوحة الأدمن) ──
+def extras_markup(pid, extras):
+    B = InlineKeyboardButton
+    rows = []
+    for f in extras:
+        icon = "🔢" if f.get("kind") == "number" else "🔤"
+        rows.append([B(f"{icon} {f['label'][:40]}", callback_data=f"xf_{pid}_{f['id']}")])
+    if len(extras) < MAX_EXTRAS:
+        rows.append([B(T("b_x_add"), callback_data=f"xpick_{pid}")])
+    rows.append([B(T("b_x_prod"), callback_data=f"adm_panel_{pid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _show(message, text, markup, edit=True):
+    if edit:
+        try:
+            await message.edit_text(text, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    await message.reply_text(text, reply_markup=markup)
+
+
+async def render_extras(message, pid, edit=False):
+    p = get_product(pid)
+    if not p:
+        await message.reply_text(T("not_found"))
+        return
+    extras = list_extras(pid)
+    text = T("x_list_title", name=esc(p["name"]))
+    if not extras:
+        text += "\n\n" + T("x_none")
+    await _show(message, text, extras_markup(pid, extras), edit)
+
+
+def field_text(f):
+    t = f"🧩 <b>{esc(f['label'])}</b>\n{T('x_field_kind', kind=kind_label(f))}\n"
+    rules = extra_rules(f)
+    t += ("\n".join(rules) if rules else T("x_field_norules")) + "\n\n"
+    t += T("x_field_used", n=field_usage(f["id"]))
+    return t
+
+
+async def x_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أزرار الحقول خارج المحادثة: القائمة، المكتبة، ربط/فصل/حذف حقل."""
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return
+    parts = q.data.split("_")
+    action, nums = parts[0], [int(x) for x in parts[1:]]
+    pid = nums[0]
+
+    if action == "xl":
+        await render_extras(q.message, pid, edit=True)
+        return
+    p = get_product(pid)
+    if not p:
+        await q.message.reply_text(T("not_found"))
+        return
+    B = InlineKeyboardButton
+
+    if action == "xpick":                    # شاشة اختيار حقل محفوظ
+        used = {f["id"] for f in list_extras(pid)}
+        lib = [f for f in list_library() if f["id"] not in used]
+        rows = [[B(f"{'🔢' if f.get('kind') == 'number' else '🔤'} {f['label'][:40]}",
+                   callback_data=f"xat_{pid}_{f['id']}")] for f in lib]
+        rows.append([B(T("b_x_new"), callback_data=f"xnew_{pid}")])
+        rows.append([B(T("b_x_back"), callback_data=f"xl_{pid}")])
+        text = T("x_pick_title", name=esc(p["name"]))
+        if not lib:
+            text += "\n\n" + T("x_pick_none")
+        await _show(q.message, text, InlineKeyboardMarkup(rows))
+        return
+
+    fid = nums[1]
+    if action == "xat":                      # ربط حقل محفوظ بالمنتج
+        if len(list_extras(pid)) >= MAX_EXTRAS:
+            await q.message.reply_text(T("x_max", n=MAX_EXTRAS))
+            return
+        attach_extra(pid, fid)
+        await render_extras(q.message, pid, edit=True)
+        return
+
+    f = get_extra(fid)
+    if not f:
+        await q.message.reply_text(T("not_found"))
+        return
+    if action == "xf":                       # لوحة حقل
+        kb = InlineKeyboardMarkup([
+            [B(T("b_x_edit"), callback_data=f"xedit_{pid}_{fid}")],
+            [B(T("b_x_unlink"), callback_data=f"xun_{pid}_{fid}")],
+            [B(T("b_x_kill"), callback_data=f"xkill_{pid}_{fid}")],
+            [B(T("b_x_back"), callback_data=f"xl_{pid}")],
+        ])
+        await _show(q.message, field_text(f), kb)
+    elif action == "xun":
+        detach_extra(pid, fid)
+        await render_extras(q.message, pid, edit=True)
+    elif action == "xkill":
+        delete_extra(fid)
+        await render_extras(q.message, pid, edit=True)
+
+
+async def x_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بدء محادثة إنشاء حقل جديد (xnew_<pid>) أو تعديل حقل محفوظ (xedit_<pid>_<fid>)."""
+    q = update.callback_query
+    if not is_admin(update):
+        await q.answer()
+        return ConversationHandler.END
+    parts = q.data.split("_")
+    action, pid = parts[0], int(parts[1])
+    if not get_product(pid):
+        await q.answer()
+        await q.message.reply_text(T("not_found"))
+        return ConversationHandler.END
+
+    if action == "xnew":
+        if len(list_extras(pid)) >= MAX_EXTRAS:
+            await q.answer(T("x_max", n=MAX_EXTRAS), show_alert=True)
+            return ConversationHandler.END
+        context.user_data["adm"] = {"mode": "xfield", "pid": pid, "xid": None}
+    else:
+        fid = int(parts[2])
+        if not get_extra(fid):
+            await q.answer()
+            await q.message.reply_text(T("not_found"))
+            return ConversationHandler.END
+        context.user_data["adm"] = {"mode": "xfield", "pid": pid, "xid": fid}
+
+    await q.answer()
+    await q.message.reply_text(T("x_ask"))
+    return X_LABEL
+
+
 async def got_x_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = adm(context)
     t = update.message.text.strip()
-    if t == "-":
-        pid = a["pid"]
-        update_product(pid, extra_label=None, extra_type=None,
-                       extra_len=0, extra_prefix=None, extra_suffix=None)
-        context.user_data.pop("adm", None)
-        await update.message.reply_text(T("x_removed"))
-        await render_panel(update.message, pid)
-        return ConversationHandler.END
     if not (2 <= len(t) <= 200):
         await update.message.reply_text(T("x_bad_len"))
         return X_LABEL
@@ -2119,17 +2455,23 @@ async def got_x_suf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(T("x_rules_long", n=a["xlen"]))
             return X_SUF
         suf = t
-    update_product(
-        pid,
-        extra_label=a["xlabel"],
-        extra_type=a.get("xtype", "text"),
-        extra_len=a.get("xlen") or 0,
-        extra_prefix=a.get("xpre"),
-        extra_suffix=suf,
-    )
+
+    kind = a.get("xtype", "text")
+    flen = a.get("xlen") or 0
+    xid = a.get("xid")
+    if xid and get_extra(xid):
+        update_extra(xid, a["xlabel"], kind, flen, a.get("xpre"), suf)
+    else:
+        if len(list_extras(pid)) >= MAX_EXTRAS:
+            context.user_data.pop("adm", None)
+            await update.message.reply_text(T("x_max", n=MAX_EXTRAS))
+            return ConversationHandler.END
+        xid = add_extra(a["xlabel"], kind, flen, a.get("xpre"), suf)
+        attach_extra(pid, xid)
+
     context.user_data.pop("adm", None)
     await update.message.reply_text(T("x_saved"))
-    await render_panel(update.message, pid)
+    await render_extras(update.message, pid)
     return ConversationHandler.END
 
 
@@ -2430,7 +2772,8 @@ def register_handlers(app: Application, is_main: bool):
             CommandHandler("setwallet", cmd_setwallet),
             CallbackQueryHandler(wallet_entry, pattern=r"^adm_wallet$"),
             CallbackQueryHandler(new_product_cb, pattern=r"^adm_new$"),
-            CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|ton|stock|photos|deliv|extra)_\d+$"),
+            CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|ton|stock|photos|deliv)_\d+$"),
+            CallbackQueryHandler(x_entry, pattern=r"^(xnew_\d+|xedit_\d+_\d+)$"),
         ],
         states={
             A_NAME: [MessageHandler(text_only, got_name)],
@@ -2511,6 +2854,7 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^setlang_(ar|en)$"))
     app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
     app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|offstars|offton|clrphotos|del|delyes)_\d+$"))
+    app.add_handler(CallbackQueryHandler(x_cb, pattern=r"^(xl_\d+|xpick_\d+|xat_\d+_\d+|xf_\d+_\d+|xun_\d+_\d+|xkill_\d+_\d+)$"))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("products", cmd_products))
     app.add_handler(CommandHandler("orders", cmd_orders))
