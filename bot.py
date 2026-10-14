@@ -62,6 +62,8 @@ PHONE, WILAYA, ADDRESS, CONFIRM, EXTRA = range(5)
 A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE, X_LABEL, X_TYPE = range(20, 30)
 W_ADDR, A_TON, A_METHOD = 30, 31, 32
 X_LEN, X_PRE, X_SUF = 33, 34, 35
+M_UP = 36
+LIB_PAGE = 8   # عدد عناصر المكتبة في الصفحة
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
@@ -368,6 +370,38 @@ _S = [
     ("x_rules_long", "⚠️ البداية/النهاية أطول من الطول المحدد ({n}). أعد المحاولة.",
      "⚠️ The start/end values are longer than the set length ({n}). Try again."),
 
+    # ── مكتبة الوسائط + وسائط قائمة المنتجات ──
+    ("b_lm", "🖼 وسائط قائمة المنتجات", "🖼 Product list media"),
+    ("b_mlib", "📚 مكتبة الوسائط", "📚 Media library"),
+    ("b_lib", "📚 إضافة من المكتبة", "📚 Add from library"),
+    ("lm_title",
+     "🖼 <b>وسائط قائمة المنتجات</b>\nتظهر هذه الصور/الفيديوهات فوق قائمة «كل المنتجات».\n\n📷 الحالية: {n}",
+     "🖼 <b>Product list media</b>\nThese photos/videos appear above the “All products” list.\n\n📷 Current: {n}"),
+    ("b_lm_up", "📤 رفع جديد", "📤 Upload new"),
+    ("b_lm_lib", "📚 من المكتبة", "📚 From library"),
+    ("b_lm_clear", "🧹 مسح الوسائط", "🧹 Clear media"),
+    ("b_lib_up", "📤 رفع إلى المكتبة", "📤 Upload to library"),
+    ("b_done", "✅ تم", "✅ Done"),
+    ("lib_title_pick",
+     "📚 <b>المكتبة</b> ({total})\nاضغط على رقم الوسيلة لإضافتها (الأرقام مكتوبة على الصور فوق) 👇",
+     "📚 <b>Library</b> ({total})\nTap a media number to add it (numbers are written on the previews above) 👇"),
+    ("lib_title_manage",
+     "📚 <b>مكتبة الوسائط</b> ({total})\nاضغط على 🗑 لحذف وسيلة من المكتبة (لا يحذفها من المنتجات التي تستعملها).",
+     "📚 <b>Media library</b> ({total})\nTap 🗑 to delete an item from the library (it stays in products already using it)."),
+    ("lib_empty", "المكتبة فارغة. أرسل صوراً أو فيديوهات لتُحفظ فيها.", "The library is empty. Upload photos or videos to save them."),
+    ("lib_added", "✅ أُضيفت ({i}/{n})", "✅ Added ({i}/{n})"),
+    ("lib_dup", "هذه الوسيلة مضافة مسبقاً.", "This media is already added."),
+    ("lib_deleted", "🗑 حُذفت من المكتبة", "🗑 Deleted from library"),
+    ("lib_saved", "✅ حُفظت في المكتبة. أرسل غيرها أو اكتب /done.", "✅ Saved to the library. Send more or /done."),
+    ("lm_saved", "✅ أُضيفت لقائمة المنتجات وحُفظت في المكتبة ({i}/{n}). أرسل غيرها أو /done.",
+     "✅ Added to the product list and saved to the library ({i}/{n}). Send more or /done."),
+    ("mup_ask_l",
+     "📤 أرسل <b>صور و/أو فيديوهات</b> لقائمة المنتجات (كصور/فيديو وليس كملفات).\nتُحفظ أيضاً في المكتبة لإعادة استعمالها.\nعند الانتهاء اكتب /done.",
+     "📤 Send <b>photos and/or videos</b> for the product list (as photos/videos, not files).\nThey are also saved to the library for reuse.\nWhen finished send /done."),
+    ("mup_ask_x",
+     "📤 أرسل <b>صور و/أو فيديوهات</b> لحفظها في المكتبة (كصور/فيديو وليس كملفات).\nعند الانتهاء اكتب /done.",
+     "📤 Send <b>photos and/or videos</b> to save in the library (as photos/videos, not files).\nWhen finished send /done."),
+
     # ── الطلبات ──
     ("no_orders", "لا توجد طلبات مدفوعة بعد.", "No paid orders yet."),
     ("shipped_usage", "الاستعمال: <code>/shipped رقم_الطلب</code>", "Usage: <code>/shipped order_number</code>"),
@@ -617,6 +651,17 @@ def init_db():
                 id {pk},
                 product_id INT NOT NULL,
                 field_id INT NOT NULL
+            )
+        """)
+        # مكتبة الوسائط: كل وسيلة تُرفع مرة واحدة وتُستعمل في أي منتج أو في قائمة المنتجات
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS shop_media (
+                id {pk},
+                shop_id BIGINT NOT NULL DEFAULT 0,
+                file_id TEXT NOT NULL,
+                unique_id TEXT,
+                kind TEXT DEFAULT 'photo',
+                created_at BIGINT
             )
         """)
         # (جدول قديم من الإصدار السابق، يُستعمل فقط للترحيل)
@@ -919,6 +964,60 @@ def field_usage(fid):
         return cur.fetchone()["n"]
 
 
+# ── مكتبة الوسائط ──
+def lib_add(file_id, unique_id, kind="photo"):
+    """يحفظ وسيلة في مكتبة المتجر (بدون تكرار). يرجع رقمها."""
+    with cursor() as cur:
+        if unique_id:
+            cur.execute("SELECT id FROM shop_media WHERE shop_id=? AND unique_id=?", (shop_id(), unique_id))
+            r = cur.fetchone()
+            if r:
+                return r["id"]
+        cur.execute("""
+            INSERT INTO shop_media (shop_id, file_id, unique_id, kind, created_at)
+            VALUES (?,?,?,?,?) RETURNING id
+        """, (shop_id(), file_id, unique_id, kind, int(time.time())))
+        return cur.fetchone()["id"]
+
+
+def lib_list(limit, offset):
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_media WHERE shop_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (shop_id(), limit, offset))
+        return cur.fetchall()
+
+
+def lib_count():
+    with cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM shop_media WHERE shop_id=?", (shop_id(),))
+        return cur.fetchone()["n"]
+
+
+def lib_get(mid):
+    with cursor() as cur:
+        cur.execute("SELECT * FROM shop_media WHERE id=? AND shop_id=?", (mid, shop_id()))
+        return cur.fetchone()
+
+
+def lib_delete(mid):
+    with cursor() as cur:
+        cur.execute("DELETE FROM shop_media WHERE id=? AND shop_id=?", (mid, shop_id()))
+
+
+# ── وسائط قائمة «كل المنتجات» ──
+def get_list_media():
+    try:
+        v = _load_setting(f"list_media_{shop_id()}")
+        return json.loads(v) if v else []
+    except Exception as e:
+        log.warning("get_list_media failed: %s", e)
+        return []
+
+
+def set_list_media(items):
+    _save_setting(f"list_media_{shop_id()}", json.dumps(items))
+
+
 # ── المخزون والحجز (الحجز = طلبات pending لم تنتهِ مهلتها) ──
 def _held_by_others(cur, pid, uid):
     cur.execute("""
@@ -1207,12 +1306,32 @@ def is_admin(update):
 # ═════════════════════════════════════════════════════════════════════════════
 # 6) واجهة الزبون: العرض
 # ═════════════════════════════════════════════════════════════════════════════
+async def send_with_media(message, text, markup, media):
+    """يرسل الوسائط (صورة/فيديو/ألبوم) ثم النص والأزرار."""
+    try:
+        if len(media) == 1:
+            m = media[0]
+            send = message.reply_video if m["kind"] == "video" else message.reply_photo
+            if len(text) <= 1000:
+                await send(m["file_id"], caption=text, reply_markup=markup)
+                return
+            await send(m["file_id"])
+        elif len(media) >= 2:
+            await message.reply_media_group([
+                InputMediaVideo(m["file_id"]) if m["kind"] == "video" else InputMediaPhoto(m["file_id"])
+                for m in media
+            ])
+    except Exception as e:
+        log.warning("media failed: %s", e)
+    await message.reply_text(text, reply_markup=markup)
+
+
 async def show_list(message, prods):
     rows = []
     for p in prods:
         mark = "❌ " if p["stock"] == 0 else ("🛠 " if p["shipping"] else "💾 ")
         rows.append([InlineKeyboardButton(f"{mark}{p['name'][:40]} — {price_label(p)}", callback_data=f"prod_{p['id']}")])
-    await message.reply_text(T("list_title"), reply_markup=InlineKeyboardMarkup(rows))
+    await send_with_media(message, T("list_title"), InlineKeyboardMarkup(rows), get_list_media()[:MAX_PHOTOS])
 
 
 async def show_product(message, p, uid):
@@ -1245,23 +1364,7 @@ async def show_product(message, p, uid):
         rows.append([InlineKeyboardButton(T("btn_all_products"), callback_data="list")])
     markup = InlineKeyboardMarkup(rows) if rows else None
 
-    media = get_media(p["id"])[:MAX_PHOTOS]
-    try:
-        if len(media) == 1:
-            m = media[0]
-            send = message.reply_video if m["kind"] == "video" else message.reply_photo
-            if len(text) <= 1000:
-                await send(m["file_id"], caption=text, reply_markup=markup)
-                return
-            await send(m["file_id"])
-        elif len(media) >= 2:
-            await message.reply_media_group([
-                InputMediaVideo(m["file_id"]) if m["kind"] == "video" else InputMediaPhoto(m["file_id"])
-                for m in media
-            ])
-    except Exception as e:
-        log.warning("media failed: %s", e)
-    await message.reply_text(text, reply_markup=markup)
+    await send_with_media(message, text, markup, get_media(p["id"])[:MAX_PHOTOS])
 
 
 async def send_home(message, uid):
@@ -1856,6 +1959,7 @@ def panel_markup(p):
         [B(T("b_stock"), callback_data=f"edt_stock_{i}")],
         [B(T("b_photos"), callback_data=f"edt_photos_{i}"),
          B(T("b_clr"), callback_data=f"adm_clrphotos_{i}")],
+        [B(T("b_lib"), callback_data=f"mpick_p{i}_0")],
         [B(T("b_to_dig") if p["shipping"] else T("b_to_phys"), callback_data=f"adm_ship_{i}")],
     ]
     if p.get("price_ton") and stars_on(p):   # الاثنان مفعّلان ← يمكن حذف أحدهما
@@ -1890,6 +1994,8 @@ async def send_products_admin(message):
         f"{'✅' if p['active'] else '🚫'} {'🛠' if p['shipping'] else '💾'} {p['name'][:30]} — {price_label(p)}",
         callback_data=f"adm_panel_{p['id']}")] for p in prods]
     rows.append([InlineKeyboardButton(T("b_add"), callback_data="adm_new")])
+    rows.append([InlineKeyboardButton(T("b_lm"), callback_data="lm_open")])
+    rows.append([InlineKeyboardButton(T("b_mlib"), callback_data="mpick_x_0")])
     rows.append([InlineKeyboardButton(T("b_wallet"), callback_data="adm_wallet")])
     await message.reply_text(T("products_title"), reply_markup=InlineKeyboardMarkup(rows))
 
@@ -2100,9 +2206,11 @@ async def got_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return A_PHOTOS
     if update.message.video:
         add_photo(pid, update.message.video.file_id, "video")
+        lib_add(update.message.video.file_id, update.message.video.file_unique_id, "video")
         what = T("what_video")
     else:
         add_photo(pid, update.message.photo[-1].file_id, "photo")
+        lib_add(update.message.photo[-1].file_id, update.message.photo[-1].file_unique_id, "photo")
         what = T("what_photo")
     await update.message.reply_text(T("media_added", what=what, i=n + 1, n=MAX_PHOTOS))
     return A_PHOTOS
@@ -2475,6 +2583,171 @@ async def got_x_suf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ── مكتبة الوسائط ووسائط قائمة المنتجات (أدمن) ──
+async def show_lm_panel(message, edit=False):
+    B = InlineKeyboardButton
+    kb = InlineKeyboardMarkup([
+        [B(T("b_lm_up"), callback_data="mup_l"), B(T("b_lm_lib"), callback_data="mpick_l_0")],
+        [B(T("b_lm_clear"), callback_data="lm_clear")],
+        [B(T("b_back"), callback_data="adm_list")],
+    ])
+    await _show(message, T("lm_title", n=len(get_list_media())), kb, edit)
+
+
+async def send_library_page(message, target, page):
+    """يعرض صفحة من المكتبة: معاينة الوسائط (مرقّمة) + أزرار الاختيار.
+    target: 'x' إدارة/حذف، 'l' قائمة المنتجات، 'p<ID>' منتج."""
+    manage = target == "x"
+    total = lib_count()
+    items = lib_list(LIB_PAGE, page * LIB_PAGE)
+    if not items and page > 0:
+        return await send_library_page(message, target, 0)
+    B = InlineKeyboardButton
+
+    if items:
+        try:
+            if len(items) == 1:
+                m = items[0]
+                send = message.reply_video if m["kind"] == "video" else message.reply_photo
+                await send(m["file_id"], caption=f"#{m['id']}")
+            else:
+                await message.reply_media_group([
+                    (InputMediaVideo if m["kind"] == "video" else InputMediaPhoto)(m["file_id"], caption=f"#{m['id']}")
+                    for m in items
+                ])
+        except Exception as e:
+            log.warning("library preview failed: %s", e)
+
+    rows, row = [], []
+    for m in items:
+        icon = "🗑" if manage else ("🎬" if m["kind"] == "video" else "🖼")
+        cb = f"mdel_{m['id']}_{page}" if manage else f"madd_{target}_{m['id']}"
+        row.append(B(f"{icon} #{m['id']}", callback_data=cb))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append(B("◀️", callback_data=f"mpick_{target}_{page - 1}"))
+    if (page + 1) * LIB_PAGE < total:
+        nav.append(B("▶️", callback_data=f"mpick_{target}_{page + 1}"))
+    if nav:
+        rows.append(nav)
+    if manage:
+        rows.append([B(T("b_lib_up"), callback_data="mup_x")])
+        rows.append([B(T("b_back"), callback_data="adm_list")])
+    else:
+        back = "lm_open" if target == "l" else f"adm_panel_{target[1:]}"
+        rows.append([B(T("b_done"), callback_data=back)])
+
+    text = T("lib_title_manage" if manage else "lib_title_pick", total=total)
+    if not items:
+        text += "\n\n" + T("lib_empty")
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def media_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not is_admin(update):
+        await q.answer()
+        return
+    toast = None
+    data = q.data
+    parts = data.split("_")
+
+    if data == "lm_open":
+        await show_lm_panel(q.message)
+    elif data == "lm_clear":
+        set_list_media([])
+        await show_lm_panel(q.message, edit=True)
+    elif parts[0] == "mpick":                       # mpick_<target>_<page>
+        await send_library_page(q.message, parts[1], int(parts[2]))
+    elif parts[0] == "mdel":                        # mdel_<id>_<page>
+        lib_delete(int(parts[1]))
+        toast = T("lib_deleted")
+        await send_library_page(q.message, "x", int(parts[2]))
+    elif parts[0] == "madd":                        # madd_<target>_<id>
+        target, mid = parts[1], int(parts[2])
+        m = lib_get(mid)
+        if not m:
+            toast = T("not_found")
+        elif target == "l":
+            items = get_list_media()
+            if any(x["file_id"] == m["file_id"] for x in items):
+                toast = T("lib_dup")
+            elif len(items) >= MAX_PHOTOS:
+                toast = T("media_max", n=MAX_PHOTOS)
+            else:
+                items.append({"file_id": m["file_id"], "kind": m["kind"] or "photo"})
+                set_list_media(items)
+                toast = T("lib_added", i=len(items), n=MAX_PHOTOS)
+        else:
+            pid = int(target[1:])
+            if not get_product(pid):
+                toast = T("not_found")
+            else:
+                cur_media = get_media(pid)
+                if any(x["file_id"] == m["file_id"] for x in cur_media):
+                    toast = T("lib_dup")
+                elif len(cur_media) >= MAX_PHOTOS:
+                    toast = T("media_max", n=MAX_PHOTOS)
+                else:
+                    add_photo(pid, m["file_id"], m["kind"] or "photo")
+                    toast = T("lib_added", i=len(cur_media) + 1, n=MAX_PHOTOS)
+    await q.answer(toast)
+
+
+async def mup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """رفع وسائط جديدة: mup_l لقائمة المنتجات (+المكتبة)، mup_x للمكتبة فقط."""
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return ConversationHandler.END
+    kind = q.data.split("_")[1]
+    context.user_data["adm"] = {"mode": "listmedia" if kind == "l" else "library"}
+    await q.message.reply_text(T("mup_ask_l" if kind == "l" else "mup_ask_x"))
+    return M_UP
+
+
+async def got_lmedia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = adm(context)
+    msg = update.message
+    if msg.video:
+        fid, uid, kind = msg.video.file_id, msg.video.file_unique_id, "video"
+    else:
+        ph = msg.photo[-1]
+        fid, uid, kind = ph.file_id, ph.file_unique_id, "photo"
+    lib_add(fid, uid, kind)
+    if a.get("mode") == "listmedia":
+        items = get_list_media()
+        if len(items) >= MAX_PHOTOS:
+            await msg.reply_text(T("media_max", n=MAX_PHOTOS))
+            return M_UP
+        if not any(x["file_id"] == fid for x in items):
+            items.append({"file_id": fid, "kind": kind})
+            set_list_media(items)
+        await msg.reply_text(T("lm_saved", i=len(items), n=MAX_PHOTOS))
+    else:
+        await msg.reply_text(T("lib_saved"))
+    return M_UP
+
+
+async def lmedia_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(T("media_wrong"))
+    return M_UP
+
+
+async def lmedia_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = context.user_data.pop("adm", {})
+    if a.get("mode") == "listmedia":
+        await show_lm_panel(update.message)
+    else:
+        await send_products_admin(update.message)
+    return ConversationHandler.END
+
+
 async def adm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = context.user_data.pop("adm", {})
     if a.get("mode") == "new" and a.get("pid"):
@@ -2774,6 +3047,7 @@ def register_handlers(app: Application, is_main: bool):
             CallbackQueryHandler(new_product_cb, pattern=r"^adm_new$"),
             CallbackQueryHandler(edit_entry, pattern=r"^edt_(name|desc|price|ton|stock|photos|deliv)_\d+$"),
             CallbackQueryHandler(x_entry, pattern=r"^(xnew_\d+|xedit_\d+_\d+)$"),
+            CallbackQueryHandler(mup_entry, pattern=r"^mup_(l|x)$"),
         ],
         states={
             A_NAME: [MessageHandler(text_only, got_name)],
@@ -2803,6 +3077,11 @@ def register_handlers(app: Application, is_main: bool):
             X_LEN: [MessageHandler(text_only, got_x_len)],
             X_PRE: [MessageHandler(text_only, got_x_pre)],
             X_SUF: [MessageHandler(text_only, got_x_suf)],
+            M_UP: [
+                MessageHandler(filters.PHOTO | filters.VIDEO, got_lmedia),
+                CommandHandler(["done", "skip"], lmedia_done),
+                MessageHandler(text_only, lmedia_wrong),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", adm_cancel),
@@ -2855,6 +3134,8 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
     app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|offstars|offton|clrphotos|del|delyes)_\d+$"))
     app.add_handler(CallbackQueryHandler(x_cb, pattern=r"^(xl_\d+|xpick_\d+|xat_\d+_\d+|xf_\d+_\d+|xun_\d+_\d+|xkill_\d+_\d+)$"))
+    app.add_handler(CallbackQueryHandler(
+        media_cb, pattern=r"^(lm_open|lm_clear|mpick_(p\d+|l|x)_\d+|madd_(p\d+|l)_\d+|mdel_\d+_\d+)$"))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("products", cmd_products))
     app.add_handler(CommandHandler("orders", cmd_orders))
