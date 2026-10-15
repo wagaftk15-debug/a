@@ -3547,7 +3547,6 @@ async def cmd_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(T("phone_ask"), reply_markup=kb)
 
-
 WEB_HTML = r"""<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
@@ -3556,46 +3555,74 @@ WEB_HTML = r"""<!doctype html>
 <title>Shop</title>
 <script async src="/tg.js" onerror="var s=document.createElement('script');s.src='https://telegram.org/js/telegram-web-app.js';document.head.appendChild(s)"></script>
 <style>
-:root{--bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#17181a);--hint:var(--tg-theme-hint-color,#7d838c);--btn:var(--tg-theme-button-color,#2a8cff);--btx:var(--tg-theme-button-text-color,#fff);--card:var(--tg-theme-secondary-bg-color,#f1f3f7);--line:rgba(127,127,127,.22)}
+:root{
+  --bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#17181a);--hint:var(--tg-theme-hint-color,#7d838c);
+  --btn:var(--tg-theme-button-color,#2a8cff);--btx:var(--tg-theme-button-text-color,#fff);
+  --card:var(--tg-theme-secondary-bg-color,#f1f3f7);--line:rgba(127,127,127,.18);
+  --star:#f5a524;--star-bg:rgba(245,165,36,.16);--ton:#0098ea;--ton-bg:rgba(0,152,234,.14);
+  --red:#e5484d;--green:#2fb67c;--r-lg:20px;--r-md:14px;--r-sm:10px
+}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0}
-body{background:var(--bg);color:var(--tx);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Tahoma,sans-serif;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
-.wrap{padding:14px 14px 20px;max-width:640px;margin:0 auto}
-h1{font-size:22px;margin:4px 0 12px}
-h2{font-size:19px;margin:6px 0 10px}
-.hint{color:var(--hint);font-size:13px}
-.list{display:flex;flex-direction:column;gap:10px}
-.card{background:var(--card);border-radius:16px;padding:14px;cursor:pointer;position:relative;display:flex;align-items:center;gap:12px}
+body{background:var(--bg);color:var(--tx);font:15px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Arabic",Tahoma,sans-serif;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+.wrap{padding:16px 16px 28px;max-width:560px;margin:0 auto}
+.wrap.has-bar{padding-bottom:110px}
+h1{font-size:26px;line-height:1.25;margin:2px 0 4px;font-weight:800}
+h2{font-size:21px;line-height:1.3;margin:0 0 6px;font-weight:800}
+.hint{color:var(--hint);font-size:13px;margin:0}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.logo{width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,var(--btn),var(--ton));color:#fff;display:grid;place-items:center;font-size:22px;font-weight:800;flex:0 0 auto}
+.list{display:flex;flex-direction:column;gap:12px}
+.card{background:var(--card);border-radius:var(--r-lg);padding:12px;cursor:pointer;display:flex;align-items:center;gap:14px;transition:transform .12s}
 .card:active{transform:scale(.98)}
-.ico{font-size:28px;flex:0 0 auto}
+.card.off{opacity:.6}
+.tile{width:60px;height:60px;border-radius:var(--r-md);display:grid;place-items:center;font-size:28px;flex:0 0 auto;background:linear-gradient(135deg,rgba(42,140,255,.2),rgba(0,152,234,.08))}
+.tile.dig{background:linear-gradient(135deg,rgba(47,182,124,.24),rgba(47,182,124,.07))}
+.tile.lg{width:84px;height:84px;font-size:40px;border-radius:24px}
 .info{flex:1;min-width:0}
-.name{font-weight:600;margin-bottom:6px;overflow:hidden;text-overflow:ellipsis}
+.name{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{color:var(--hint);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:1px 0 8px}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
-.chip{background:var(--bg);border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
-.badge{background:#e5484d;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px;flex:0 0 auto}
-button{font:inherit;border:0;border-radius:14px;padding:14px 16px;width:100%;cursor:pointer;margin-top:10px;font-weight:600}
+.chip{border-radius:999px;padding:3px 11px;font-size:13px;font-weight:700;background:var(--bg)}
+.chip.s{background:var(--star-bg);color:var(--star)}
+.chip.t{background:var(--ton-bg);color:var(--ton)}
+.badge{background:var(--red);color:#fff;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600;flex:0 0 auto}
+button{font:inherit;border:0;border-radius:var(--r-md);padding:15px 16px;width:100%;cursor:pointer;margin-top:10px;font-weight:700;transition:transform .12s,opacity .2s}
+button:active{transform:scale(.98)}
 button.primary{background:var(--btn);color:var(--btx)}
+button.star{background:var(--star);color:#2b1d00}
+button.tonb{background:var(--ton);color:#fff}
 button.secondary{background:var(--card);color:var(--tx)}
 button:disabled{opacity:.5}
-label{display:block;margin:14px 0 6px;font-weight:600}
-input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
-.err{color:#e5484d;margin-top:10px}
-.ok{background:var(--card);border-radius:12px;padding:12px;margin-top:6px}
-.desc{white-space:pre-wrap;margin:10px 0}
-.kv{background:var(--card);border-radius:12px;padding:10px 12px;margin-top:6px;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:13px;direction:ltr;text-align:left}
+.bar{position:fixed;inset:auto 0 0 0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);z-index:5}
+.bar button{margin:0;max-width:528px;display:block;margin-inline:auto}
+.group{background:var(--card);border-radius:var(--r-lg);padding:4px 14px 14px;margin-top:14px}
+.group h3{font-size:14px;margin:14px 0 0;font-weight:700;color:var(--hint)}
+label{display:block;margin:12px 0 6px;font-weight:600;font-size:14px}
+input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--bg);border:1.5px solid var(--line);border-radius:var(--r-sm);padding:12px;outline:0;transition:border-color .15s}
+input:focus,select:focus,textarea:focus{border-color:var(--btn)}
+.err{color:var(--red);margin-top:10px;font-size:14px;font-weight:600}
+.ok{background:rgba(47,182,124,.14);color:var(--green);border-radius:var(--r-sm);padding:11px 12px;margin-top:10px;font-weight:600}
+.desc{white-space:pre-wrap;margin:14px 0;color:var(--tx);opacity:.9}
+.info-row{display:flex;gap:8px;align-items:center;color:var(--hint);font-size:13px;margin-top:8px}
+.hero{display:flex;gap:16px;align-items:center;margin-bottom:6px}
+.kv{background:var(--bg);border:1.5px dashed var(--line);border-radius:var(--r-sm);padding:10px 12px;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:13px;direction:ltr;text-align:left;cursor:pointer}
 .center{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:70vh;padding:20px}
 .big{font-size:56px}
-.sk{background:linear-gradient(90deg,var(--card) 25%,rgba(127,127,127,.18) 50%,var(--card) 75%);background-size:200% 100%;animation:sh 1.2s infinite;border-radius:16px;height:76px;margin-bottom:10px}
+.check{width:88px;height:88px;border-radius:50%;background:var(--green);display:grid;place-items:center;color:#fff;font-size:44px;margin-bottom:16px;animation:pop .45s cubic-bezier(.2,1.4,.4,1)}
+@keyframes pop{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}
+.sk{background:linear-gradient(90deg,var(--card) 25%,rgba(127,127,127,.16) 50%,var(--card) 75%);background-size:200% 100%;animation:sh 1.2s infinite;border-radius:var(--r-lg);height:84px;margin-bottom:12px}
 @keyframes sh{to{background-position:-200% 0}}
-.search{margin:0 0 12px}
-.spin{width:36px;height:36px;border:4px solid var(--line);border-top-color:var(--btn);border-radius:50%;animation:s 1s linear infinite;margin-bottom:12px}
+.search{margin:0 0 14px;border-radius:999px;padding:12px 16px}
+.spin{width:38px;height:38px;border:4px solid var(--line);border-top-color:var(--btn);border-radius:50%;animation:s 1s linear infinite;margin-bottom:14px}
 @keyframes s{to{transform:rotate(360deg)}}
-#toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);background:rgba(20,20,20,.92);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90%;text-align:center;z-index:10}
+#toast{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom));transform:translateX(-50%);background:rgba(20,20,20,.92);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90%;text-align:center;z-index:10}
 #toast.on{opacity:1}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
-<div id="app"><div class="wrap"><div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div>
+<div id="app"><div class="wrap"><div class="sk" style="height:48px;width:60%"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div>
 <div id="toast"></div>
 <script>
 let tg = window.Telegram && window.Telegram.WebApp;
@@ -3616,7 +3643,8 @@ const I18N = {
     paid_title:'تم الدفع بنجاح!', paid_msg:'وصلتك تفاصيل الطلب (والمنتج الرقمي إن وُجد) في محادثة البوت.',
     wait_title:'جارٍ تأكيد الدفع…', wait_msg:'لحظات من فضلك.', failed:'لم تكتمل العملية.',
     back_shop:'العودة للمتجر', net_err:'تعذّر الاتصال، حاول مجدداً.', cancelled:'تم إلغاء الدفع.',
-    open_tg:'افتح المتجر من داخل تيليجرام.', order:'رقم الطلب', ship_dz:'🇩🇿 البيع والتوصيل داخل الجزائر فقط', retry:'إعادة المحاولة'
+    open_tg:'افتح المتجر من داخل تيليجرام.', order:'رقم الطلب', ship_dz:'🇩🇿 التوصيل داخل الجزائر فقط', retry:'إعادة المحاولة',
+    contact:'بيانات التوصيل', details:'معلومات إضافية', payment:'طريقة الدفع', phys:'منتج مادي', dig:'منتج رقمي'
   },
   en: {
     empty:'No products available right now.', digital:'💾 Digital product — delivered right after payment', stock:'In stock',
@@ -3631,7 +3659,8 @@ const I18N = {
     paid_title:'Payment successful!', paid_msg:'Your order details (and the digital product, if any) were sent to the bot chat.',
     wait_title:'Confirming payment…', wait_msg:'Just a moment.', failed:'The operation was not completed.',
     back_shop:'Back to shop', net_err:'Connection failed, please try again.', cancelled:'Payment cancelled.',
-    open_tg:'Open the shop from inside Telegram.', order:'Order number', ship_dz:'🇩🇿 Sales and delivery inside Algeria only', retry:'Retry'
+    open_tg:'Open the shop from inside Telegram.', order:'Order number', ship_dz:'🇩🇿 Delivery inside Algeria only', retry:'Retry',
+    contact:'Delivery details', details:'Extra details', payment:'Payment', phys:'Physical product', dig:'Digital product'
   }
 };
 let L = 'ar', S = null, tcUI = null, stack = ['home'];
@@ -3687,21 +3716,24 @@ async function reload() { try { await load(); } catch (e) {} stack = ['home']; r
 
 function chips(p) {
   let h = '';
-  if (p.price != null) h += '<span class="chip">⭐ ' + esc(p.price) + '</span>';
-  if (p.price_ton != null) h += '<span class="chip">💎 ' + esc(p.price_ton) + ' TON</span>';
+  if (p.price != null) h += '<span class="chip s">⭐ ' + esc(p.price) + '</span>';
+  if (p.price_ton != null) h += '<span class="chip t">💎 ' + esc(p.price_ton) + ' TON</span>';
   return '<div class="chips">' + h + '</div>';
 }
+function tile(p, lg) { return '<div class="tile' + (p.shipping ? '' : ' dig') + (lg ? ' lg' : '') + '">' + (p.shipping ? '🛍' : '💾') + '</div>'; }
 
-/* ── الصفحات (منتجات فقط، بلا صور/فيديو) ── */
+/* ── الصفحات ── */
 function vHome() {
   const cards = S.products.map(p => {
-    const bad = p.state !== 'available' ? '<span class="badge">' + t('sold') + '</span>' : '';
-    return '<div class="card" data-n="' + esc(p.name.toLowerCase()) + '" onclick="openProduct(' + p.id + ')">' +
-      '<div class="ico">' + (p.shipping ? '🛍' : '💾') + '</div>' +
-      '<div class="info"><div class="name">' + esc(p.name) + '</div>' + chips(p) + '</div>' + bad + '</div>';
+    const off = p.state !== 'available';
+    const bad = off ? '<span class="badge">' + t('sold') + '</span>' : '';
+    const sub = p.description ? esc(p.description.replace(/\s+/g, ' ')) : (p.shipping ? t('phys') : t('dig'));
+    return '<div class="card' + (off ? ' off' : '') + '" data-n="' + esc(p.name.toLowerCase()) + '" onclick="openProduct(' + p.id + ')">' +
+      tile(p) + '<div class="info"><div class="name">' + esc(p.name) + '</div><div class="sub">' + sub + '</div>' + chips(p) + '</div>' + bad + '</div>';
   }).join('');
   const sb = S.products.length >= 6 ? '<input class="search" type="search" placeholder="🔍" oninput="filt(this.value)">' : '';
-  app.innerHTML = '<div class="wrap"><h1>' + esc(S.title) + '</h1>' + sb +
+  const ini = esc(Array.from(S.title || 'S')[0].toUpperCase());
+  app.innerHTML = '<div class="wrap"><div class="top"><div class="logo">' + ini + '</div><div><h1>' + esc(S.title) + '</h1></div></div>' + sb +
     (cards ? '<div class="list" id="grid">' + cards + '</div>' : '<p class="hint">' + t('empty') + '</p>') + '</div>';
 }
 
@@ -3715,11 +3747,13 @@ function vProduct() {
   const p = st.p;
   const ok = p.state === 'available' && p.methods.length;
   const note = p.state === 'sold' ? t('sold') : (p.state === 'held' ? t('held') : t('unavailable'));
-  const line = p.shipping ? ((p.stock >= 0 ? t('stock') + ': ' + p.stock + ' · ' : '') + t('ship_dz')) : t('digital');
-  app.innerHTML = '<div class="wrap"><h2>' + esc(p.name) + '</h2>' + chips(p) +
+  const line = p.shipping ? ((p.stock >= 0 ? t('stock') + ': ' + p.stock + ' — ' : '') + t('ship_dz')) : t('digital');
+  app.innerHTML = '<div class="wrap' + (ok ? ' has-bar' : '') + '"><div class="hero">' + tile(p, true) +
+    '<div class="info"><h2>' + esc(p.name) + '</h2>' + chips(p) + '</div></div>' +
     (p.description ? '<div class="desc">' + esc(p.description) + '</div>' : '') +
-    '<p class="hint">' + line + '</p>' +
-    (ok ? '<button class="primary" onclick="toCheckout()">' + t('buy') + '</button>' : '<p class="err">' + note + '</p>') + '</div>';
+    '<div class="info-row">' + line + '</div>' +
+    (ok ? '' : '<p class="err">' + note + '</p>') + '</div>' +
+    (ok ? '<div class="bar"><button class="primary" onclick="toCheckout()">' + t('buy') + '</button></div>' : '');
 }
 
 function toCheckout() {
@@ -3729,7 +3763,7 @@ function toCheckout() {
 
 function phoneHtml() {
   if (S.phone) return '<div class="ok">📱 +' + esc(S.phone) + ' ✅</div>';
-  return '<p class="hint">🇩🇿 ' + t('phone_hint') + '</p><button class="secondary" onclick="askPhone()">📱 ' + t('share_phone') + '</button>';
+  return '<p class="hint" style="margin-top:12px">🇩🇿 ' + t('phone_hint') + '</p><button class="secondary" style="background:var(--bg)" onclick="askPhone()">📱 ' + t('share_phone') + '</button>';
 }
 function askPhone() {
   if (!tg.requestContact) { tg.showAlert(t('phone_old')); return; }
@@ -3746,24 +3780,28 @@ async function pollPhone(n) {
 function vCheckout() {
   const p = st.p, f = st.form;
   if (p.methods.indexOf('ton') >= 0) loadTC();
-  let h = '<div class="wrap"><h2>' + esc(p.name) + '</h2>' + chips(p);
+  let h = '<div class="wrap"><div class="hero">' + tile(p) + '<div class="info"><h2 style="font-size:18px">' + esc(p.name) + '</h2>' + chips(p) + '</div></div>';
   if (p.shipping) {
-    h += '<div id="phoneBox" style="margin-top:12px">' + phoneHtml() + '</div>';
+    h += '<div class="group"><h3>' + t('contact') + '</h3><div id="phoneBox">' + phoneHtml() + '</div>';
     h += '<label>' + t('wilaya') + '</label><select onchange="st.form.wilaya=this.value"><option value="">' + t('pick') + '</option>' +
       S.wilayas.map((w, i) => '<option value="' + (i + 1) + '"' + (String(f.wilaya) === String(i + 1) ? ' selected' : '') + '>' +
         String(i + 1).padStart(2, '0') + ' ' + esc(w) + '</option>').join('') + '</select>';
-    h += '<label>' + t('address') + '</label><textarea rows="3" oninput="st.form.address=this.value">' + esc(f.address) + '</textarea>';
+    h += '<label>' + t('address') + '</label><textarea rows="3" oninput="st.form.address=this.value">' + esc(f.address) + '</textarea></div>';
   } else {
-    h += '<p class="hint" style="margin-top:12px">' + t('digital') + '</p>';
+    h += '<div class="ok" style="margin-top:14px">' + t('digital') + '</div>';
   }
-  p.extras.forEach((x, i) => {
-    h += '<label>🧩 ' + esc(x.label) + '</label><input data-i="' + i + '"' + (x.kind === 'number' ? ' inputmode="numeric"' : '') +
-      ' value="' + esc(f.extras[i]) + '" oninput="st.form.extras[' + i + ']=this.value">' +
-      (x.rules.length ? '<div class="hint">' + x.rules.map(esc).join(' · ') + '</div>' : '');
-  });
-  h += '<div id="err" class="err"></div><div id="payBtns">';
+  if (p.extras.length) {
+    h += '<div class="group"><h3>' + t('details') + '</h3>';
+    p.extras.forEach((x, i) => {
+      h += '<label>' + esc(x.label) + '</label><input data-i="' + i + '"' + (x.kind === 'number' ? ' inputmode="numeric"' : '') +
+        ' value="' + esc(f.extras[i]) + '" oninput="st.form.extras[' + i + ']=this.value">' +
+        (x.rules.length ? '<div class="hint" style="margin-top:4px">' + x.rules.map(esc).join(' · ') + '</div>' : '');
+    });
+    h += '</div>';
+  }
+  h += '<div id="err" class="err"></div><div id="payBtns" style="margin-top:6px">';
   p.methods.forEach(m => {
-    h += '<button class="primary" onclick="pay(\'' + m + '\')">' +
+    h += '<button class="' + (m === 'stars' ? 'star' : 'tonb') + '" onclick="pay(\'' + m + '\')">' +
       (m === 'stars' ? '⭐ ' + t('pay_stars') + ' (' + esc(p.price) + ')' : '💎 ' + t('pay_ton') + ' (' + esc(p.price_ton) + ' TON)') + '</button>';
   });
   app.innerHTML = h + '</div></div>';
@@ -3814,10 +3852,10 @@ function waitPaid() { show('wait', true); startPoll(); }
 function vTon() {
   const x = st.ton;
   app.innerHTML = '<div class="wrap"><h2>💎 ' + t('ton_title') + '</h2><p class="hint">' + t('ton_hint') + '</p>' +
-    '<label>' + t('amount') + '</label><div class="kv" onclick="cp(\'' + esc(x.amount) + '\')">' + esc(x.amount) + ' TON</div>' +
+    '<div class="group"><label>' + t('amount') + '</label><div class="kv" onclick="cp(\'' + esc(x.amount) + '\')">' + esc(x.amount) + ' TON</div>' +
     '<label>' + t('addr') + '</label><div class="kv" onclick="cp(\'' + esc(x.address) + '\')">' + esc(x.address) + '</div>' +
-    '<label>' + t('memo') + '</label><div class="kv" onclick="cp(\'' + esc(x.memo) + '\')">' + esc(x.memo) + '</div>' +
-    '<button class="primary" id="tonBtn" onclick="tonPay()">' + t('connect') + '</button>' +
+    '<label>' + t('memo') + '</label><div class="kv" onclick="cp(\'' + esc(x.memo) + '\')">' + esc(x.memo) + '</div></div>' +
+    '<button class="tonb" id="tonBtn" onclick="tonPay()">' + t('connect') + '</button>' +
     '<button class="secondary" onclick="tg.openLink(st.ton.url)">' + t('open_tk') + '</button>' +
     '<button class="secondary" onclick="checkTon()">' + t('check') + '</button></div>';
   setupTC();
@@ -3876,7 +3914,7 @@ function vWait() {
   app.innerHTML = '<div class="center"><div class="spin"></div><h2>' + t('wait_title') + '</h2><p class="hint">' + t('wait_msg') + '</p></div>';
 }
 function vDone() {
-  app.innerHTML = '<div class="center"><div class="big">✅</div><h2>' + t('paid_title') + '</h2><p class="hint">' + t('order') +
+  app.innerHTML = '<div class="center"><div class="check">✓</div><h2>' + t('paid_title') + '</h2><p class="hint">' + t('order') +
     ' #' + esc(st.oid) + '<br>' + t('paid_msg') + '</p><button class="primary" onclick="reload()">' + t('back_shop') + '</button></div>';
 }
 function vFailed() {
