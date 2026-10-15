@@ -2,6 +2,12 @@ import os
 import re
 import html
 import json
+import hmac
+import glob
+import base64
+import hashlib
+from types import SimpleNamespace
+from urllib.parse import parse_qsl, quote, unquote
 import time
 import asyncio
 import sqlite3
@@ -11,6 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 import httpx
+from aiohttp import web
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -18,7 +25,7 @@ from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, LabeledPrice,
     BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputMediaPhoto, InputMediaVideo,
-    Bot,
+    Bot, WebAppInfo, MenuButtonWebApp,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -49,6 +56,12 @@ RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
 MAX_EXTRA_LEN = 100   # أقصى طول يمكن للأدمن تحديده لحقل الزبون الرقمي
 MAX_EXTRAS = 10       # أقصى عدد حقول للمنتج الواحد
+
+# ── الموقع (Telegram Mini App) ──
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")   # الرابط العام للموقع: https://your-domain
+PORT = int(os.environ.get("PORT", "8080") or 8080)
+MEDIA_DIR = os.environ.get("MEDIA_DIR", "/tmp/shop_media")  # تخزين مؤقت لصور/فيديوهات المنتجات
+LOGO_PATH = os.environ.get("LOGO_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "shop_logo.png"))
 
 # اللغة الافتراضية: ar أو en
 LANGS = ("ar", "en")
@@ -402,6 +415,13 @@ _S = [
      "📤 أرسل <b>صور و/أو فيديوهات</b> لحفظها في المكتبة (كصور/فيديو وليس كملفات).\nعند الانتهاء اكتب /done.",
      "📤 Send <b>photos and/or videos</b> to save in the library (as photos/videos, not files).\nWhen finished send /done."),
 
+    # ── الموقع (Mini App) ──
+    ("btn_open_shop", "🛍 فتح المتجر", "🛍 Open the shop"),
+    ("btn_classic", "📋 القائمة العادية", "📋 Classic list"),
+    ("open_shop_msg", "👋 أهلاً بك! اضغط الزر لفتح المتجر والشراء بالنجوم أو TON من داخل التطبيق 👇",
+     "👋 Welcome! Tap the button to open the shop and pay with Stars or TON right inside the app 👇"),
+    ("menu_btn", "🛍 المتجر", "🛍 Shop"),
+
     # ── الطلبات ──
     ("no_orders", "لا توجد طلبات مدفوعة بعد.", "No paid orders yet."),
     ("shipped_usage", "الاستعمال: <code>/shipped رقم_الطلب</code>", "Usage: <code>/shipped order_number</code>"),
@@ -651,6 +671,15 @@ def init_db():
                 id {pk},
                 product_id INT NOT NULL,
                 field_id INT NOT NULL
+            )
+        """)
+        # أرقام هواتف الزبائن المتحقَّق منها (يستعملها الموقع)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shop_users (
+                shop_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                phone TEXT,
+                PRIMARY KEY (shop_id, user_id)
             )
         """)
         # مكتبة الوسائط: كل وسيلة تُرفع مرة واحدة وتُستعمل في أي منتج أو في قائمة المنتجات
@@ -962,6 +991,23 @@ def field_usage(fid):
     with cursor() as cur:
         cur.execute("SELECT COUNT(*) AS n FROM shop_product_fields WHERE field_id=?", (fid,))
         return cur.fetchone()["n"]
+
+
+# ── هاتف الزبون ──
+def save_phone(uid, phone):
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO shop_users (shop_id, user_id, phone) VALUES (?,?,?) "
+            "ON CONFLICT (shop_id, user_id) DO UPDATE SET phone=excluded.phone",
+            (shop_id(), uid, phone),
+        )
+
+
+def get_phone(uid):
+    with cursor() as cur:
+        cur.execute("SELECT phone FROM shop_users WHERE shop_id=? AND user_id=?", (shop_id(), uid))
+        r = cur.fetchone()
+    return r["phone"] if r and r["phone"] else None
 
 
 # ── مكتبة الوسائط ──
@@ -1375,6 +1421,9 @@ async def send_home(message, uid):
             msg += T("admin_add_hint")
         await message.reply_text(msg)
         return
+    if WEBAPP_URL:
+        await message.reply_text(T("open_shop_msg"), reply_markup=webapp_keyboard())
+        return
     if len(prods) == 1:
         await show_product(message, prods[0], uid)
     else:
@@ -1536,6 +1585,7 @@ async def got_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T("phone_not_dz"), reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
     context.user_data["phone"] = phone
+    save_phone(update.effective_user.id, phone)
     await update.message.reply_text(T("phone_ok"), reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text(T("pick_wilaya"), reply_markup=wilaya_keyboard())
     return WILAYA
@@ -2949,6 +2999,700 @@ async def load_shops():
 # ═════════════════════════════════════════════════════════════════════════════
 # 12) قوائم الأوامر + التشغيل
 # ═════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
+# 13) الموقع: Telegram Mini App (متجر داخل تيليجرام + دفع بالنجوم أو TON من داخله)
+# ═════════════════════════════════════════════════════════════════════════════
+MAIN_APP = None       # Application الخاصة بالبوت الرئيسي
+WEB_RUNNER = None
+MEDIA_LOCK = None
+
+
+def webapp_url(sid):
+    return f"{WEBAPP_URL}/app/{sid}"
+
+
+def webapp_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(T("btn_open_shop"), web_app=WebAppInfo(url=webapp_url(shop_id())))],
+        [InlineKeyboardButton(T("btn_classic"), callback_data="list")],
+    ])
+
+
+def shop_app(sid):
+    """Application الخاصة بالمتجر (الرئيسي أو فرعي) أو None."""
+    return MAIN_APP if sid == 0 else RUNNING.get(sid)
+
+
+def plain(s):
+    return html.unescape(re.sub(r"<[^>]+>", "", str(s)))
+
+
+def verify_init_data(init_data, token, max_age=86400):
+    """يتحقق من initData القادمة من تيليجرام (توقيع HMAC) ويرجع بيانات المستخدم أو None."""
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        got = pairs.pop("hash", "")
+        check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+        calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        if not got or not hmac.compare_digest(calc, got):
+            return None
+        if time.time() - int(pairs.get("auth_date", "0")) > max_age:
+            return None
+        u = json.loads(pairs.get("user", "{}"))
+        if not u.get("id"):
+            return None
+        name = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x)
+        return SimpleNamespace(id=int(u["id"]), username=u.get("username") or "", full_name=name)
+    except Exception:
+        return None
+
+
+class _Ctx:
+    """بديل خفيف لـ context يكفي لدوال الدفع (finalize_paid / watch_ton)."""
+    def __init__(self, bot):
+        self.bot = bot
+
+
+def ton_comment_payload(text):
+    """يبني payload (BOC بصيغة base64) لتحويل TON مع تعليق نصي — خلية واحدة بلا مراجع."""
+    data = b"\x00\x00\x00\x00" + text.encode()
+    cell = bytes([0, len(data) * 2]) + data
+    boc = bytes([0xB5, 0xEE, 0x9C, 0x72, 0x01, 0x01, 0x01, 0x01, 0x00, len(cell), 0x00]) + cell
+    return base64.b64encode(boc).decode()
+
+
+def media_url(sid, file_id):
+    return f"/media/{sid}/{quote(file_id, safe='')}"
+
+
+def media_allowed(file_id):
+    """لا نخدم إلا ملفات تخص المتجر الحالي (منتجات / مكتبة / قائمة المنتجات)."""
+    with cursor() as cur:
+        cur.execute("SELECT 1 AS x FROM shop_photos ph JOIN shop_products p ON p.id=ph.product_id "
+                    "WHERE ph.file_id=? AND p.shop_id=? LIMIT 1", (file_id, shop_id()))
+        if cur.fetchone():
+            return True
+        cur.execute("SELECT 1 AS x FROM shop_media WHERE file_id=? AND shop_id=? LIMIT 1", (file_id, shop_id()))
+        if cur.fetchone():
+            return True
+    return any(m.get("file_id") == file_id for m in get_list_media())
+
+
+def product_json(p, uid, sid):
+    methods = pay_methods(p)
+    return {
+        "id": p["id"], "name": p["name"], "description": p["description"] or "",
+        "shipping": bool(p["shipping"]), "stock": p["stock"], "methods": methods,
+        "price": p["price"] if "stars" in methods else None,
+        "price_ton": fmt_ton(p["price_ton"]) if "ton" in methods else None,
+        "state": availability(p["id"], uid),
+        "media": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"]}
+                  for m in get_media(p["id"])[:MAX_PHOTOS]],
+        "extras": [{"id": f["id"], "label": f["label"], "kind": f.get("kind") or "text",
+                    "rules": [plain(r) for r in extra_rules(f)]} for f in list_extras(p["id"])],
+    }
+
+
+async def web_auth(request):
+    """يتحقق من المستخدم ويضبط سياق المتجر/اللغة لهذا الطلب."""
+    sid = int(request.match_info["sid"])
+    app = shop_app(sid)
+    if not app:
+        raise web.HTTPNotFound()
+    user = verify_init_data(request.headers.get("X-Init-Data", ""), app.bot.token)
+    if not user:
+        raise web.HTTPUnauthorized()
+    shop = app.bot_data["shop"]
+    _shop.set(shop)
+    _lang.set(get_shop_lang(sid))
+    return app, shop, user
+
+
+def _err(code, msg, **extra):
+    return web.json_response({"ok": False, "code": code, "error": plain(msg), **extra})
+
+
+async def web_health(request):
+    return web.Response(text="ok")
+
+
+async def web_page(request):
+    if not shop_app(int(request.match_info["sid"])):
+        raise web.HTTPNotFound()
+    return web.Response(text=WEB_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def web_home(request):
+    app, shop, user = await web_auth(request)
+    sid = shop["id"]
+    return web.json_response({
+        "lang": _lang.get(),
+        "title": app.bot.first_name or "Shop",
+        "bot": app.bot.username,
+        "banner": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"]} for m in get_list_media()[:MAX_PHOTOS]],
+        "products": [product_json(p, user.id, sid) for p in list_products()],
+        "phone": get_phone(user.id),
+        "wilayas": wilaya_names(),
+    })
+
+
+async def web_phone(request):
+    app, shop, user = await web_auth(request)
+    return web.json_response({"phone": get_phone(user.id)})
+
+
+async def web_order(request):
+    app, shop, user = await web_auth(request)
+    try:
+        data = await request.json()
+        pid = int(data.get("pid") or 0)
+    except Exception:
+        return _err("bad_request", T("session_expired"))
+    method = data.get("method")
+    p = get_product(pid)
+    if not p or not p["active"]:
+        return _err("gone", T("product_gone"))
+    if method not in pay_methods(p):
+        return _err("method", T("no_pay_method"))
+    state = availability(pid, user.id)
+    if state != "available":
+        return _err(state, T("unavail_" + state))
+
+    phone = wilaya = address = None
+    if p["shipping"]:
+        phone = get_phone(user.id)
+        if not phone:
+            return _err("phone", T("phone_ask"))
+        if not (phone.startswith("213") and len(phone) == 12):
+            return _err("phone_dz", T("phone_not_dz"))
+        try:
+            idx = int(data.get("wilaya") or 0)
+        except (TypeError, ValueError):
+            idx = 0
+        if not 1 <= idx <= len(WILAYAS["ar"]):
+            return _err("wilaya", T("pick_wilaya"))
+        wilaya = f"{idx:02d} - {WILAYAS['ar'][idx - 1]} / {WILAYAS['en'][idx - 1]}"
+        address = str(data.get("address") or "").strip()
+        if not (10 <= len(address) <= 300):
+            return _err("address", T("addr_bad"))
+
+    extras = list_extras(pid)
+    vals = data.get("extras") or []
+    if not isinstance(vals, list) or len(vals) != len(extras):
+        return _err("extras", T("session_expired"))
+    pairs = []
+    for i, (f, v) in enumerate(zip(extras, vals)):
+        val, e = check_extra(f, str(v))
+        if e:
+            return _err("extra", e, index=i)
+        pairs.append({"label": f["label"], "value": val})
+
+    oid, why = place_order(user, pid, phone, wilaya, address, pairs)
+    if not oid:
+        return _err(why, T("unavail_" + (why if why in ("sold", "held") else "sold")))
+    order = get_order(oid)
+
+    if method == "stars":
+        desc = T("invoice_ship_desc", name=p["name"]) if p["shipping"] else (p["description"] or p["name"])
+        try:
+            link = await app.bot.create_invoice_link(
+                title=p["name"][:32], description=desc[:255], payload=f"order_{oid}",
+                provider_token="", currency="XTR",
+                prices=[LabeledPrice(p["name"][:32], order["amount"])],
+            )
+        except Exception as e:
+            log.error("create_invoice_link failed: %s", e)
+            set_order(oid, "cancelled")
+            return _err("invoice", T("session_expired"))
+        return web.json_response({"ok": True, "oid": oid, "method": "stars", "invoice": link})
+
+    wallet = get_wallet()
+    if not (wallet and p.get("price_ton")):
+        set_order(oid, "cancelled")
+        return _err("method", T("no_pay_method"))
+    nano = to_nano(p["price_ton"])
+    with cursor() as cur:
+        cur.execute("UPDATE shop_orders SET ton_nano=? WHERE id=?", (nano, oid))
+    memo = ton_memo(oid)
+    task = asyncio.create_task(watch_ton(_Ctx(app.bot), oid))
+    TON_TASKS.add(task)
+    task.add_done_callback(TON_TASKS.discard)
+    return web.json_response({"ok": True, "oid": oid, "method": "ton", "ton": {
+        "address": wallet, "nano": str(nano), "amount": fmt_ton(nano / 1e9), "memo": memo,
+        "payload": ton_comment_payload(memo),
+        "url": f"https://app.tonkeeper.com/transfer/{wallet}?amount={nano}&text={memo}",
+    }})
+
+
+async def web_status(request):
+    app, shop, user = await web_auth(request)
+    o = get_order(int(request.match_info["oid"]))
+    if not o or o["user_id"] != user.id:
+        raise web.HTTPNotFound()
+    return web.json_response({"status": o["status"], "oid": o["id"]})
+
+
+async def web_check(request):
+    """زر «تحقق من الدفع» لطلبات TON."""
+    app, shop, user = await web_auth(request)
+    oid = int(request.match_info["oid"])
+    o = get_order(oid)
+    if not o or o["user_id"] != user.id:
+        raise web.HTTPNotFound()
+    if o["status"] == "pending" and o.get("ton_nano"):
+        h = await find_ton_payment(get_wallet(), oid, o.get("ton_nano"), o.get("created_at"))
+        if h:
+            await settle_ton(_Ctx(app.bot), o, h)
+            o = get_order(oid)
+    return web.json_response({"status": o["status"], "oid": oid})
+
+
+async def web_media(request):
+    """يخدم صور/فيديوهات المنتجات من تيليجرام (file_id) مع تخزين مؤقت على القرص."""
+    sid = int(request.match_info["sid"])
+    fid = unquote(request.match_info["fid"])
+    app = shop_app(sid)
+    if not app:
+        raise web.HTTPNotFound()
+    _shop.set(app.bot_data["shop"])
+    if not media_allowed(fid):
+        raise web.HTTPNotFound()
+    base = os.path.join(MEDIA_DIR, hashlib.sha1(f"{sid}:{fid}".encode()).hexdigest())
+
+    def cached():
+        return [x for x in glob.glob(base + ".*") if not x.endswith(".part")]
+
+    found = cached()
+    if not found:
+        async with MEDIA_LOCK:
+            found = cached()
+            if not found:
+                try:
+                    f = await app.bot.get_file(fid)
+                    ext = os.path.splitext(f.file_path or "")[1] or ".bin"
+                    await f.download_to_drive(custom_path=base + ".part")
+                    os.replace(base + ".part", base + ext)
+                    found = [base + ext]
+                except Exception as e:
+                    log.warning("media proxy failed: %s", e)
+                    raise web.HTTPNotFound()
+    return web.FileResponse(found[0], headers={"Cache-Control": "public, max-age=86400"})
+
+
+async def web_manifest(request):
+    return web.json_response(
+        {"url": WEBAPP_URL, "name": "Shop", "iconUrl": f"{WEBAPP_URL}/logo.png"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
+
+async def web_logo(request):
+    if not os.path.exists(LOGO_PATH):
+        raise web.HTTPNotFound()
+    return web.FileResponse(LOGO_PATH, headers={"Access-Control-Allow-Origin": "*"})
+
+
+def web_app_factory():
+    w = web.Application()
+    w.add_routes([
+        web.get("/", web_health),
+        web.get(r"/app/{sid:\d+}", web_page),
+        web.get(r"/api/{sid:\d+}/home", web_home),
+        web.get(r"/api/{sid:\d+}/phone", web_phone),
+        web.post(r"/api/{sid:\d+}/order", web_order),
+        web.get(r"/api/{sid:\d+}/order/{oid:\d+}", web_status),
+        web.post(r"/api/{sid:\d+}/order/{oid:\d+}/check", web_check),
+        web.get(r"/media/{sid:\d+}/{fid}", web_media),
+        web.get("/tonconnect-manifest.json", web_manifest),
+        web.get("/logo.png", web_logo),
+    ])
+    return w
+
+
+async def start_web():
+    global WEB_RUNNER, MEDIA_LOCK
+    if not WEBAPP_URL:
+        log.info("WEBAPP_URL not set: Mini App disabled (classic bot flow only)")
+        return
+    MEDIA_LOCK = asyncio.Lock()
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+    WEB_RUNNER = web.AppRunner(web_app_factory())
+    await WEB_RUNNER.setup()
+    await web.TCPSite(WEB_RUNNER, "0.0.0.0", PORT).start()
+    log.info("Mini App listening on :%s (%s)", PORT, WEBAPP_URL)
+    if not os.path.exists(LOGO_PATH):
+        log.warning("Logo not found at %s (TON Connect icon). Put shop_logo.png next to bot.py", LOGO_PATH)
+
+
+async def stop_web():
+    global WEB_RUNNER
+    if WEB_RUNNER:
+        try:
+            await WEB_RUNNER.cleanup()
+        except Exception as e:
+            log.warning("stop web failed: %s", e)
+        WEB_RUNNER = None
+
+
+# ── مشاركة رقم الهاتف خارج محادثة الطلب (يستعملها الموقع عبر requestContact) ──
+async def global_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c = update.message.contact
+    if not c or c.user_id != update.effective_user.id:
+        await update.message.reply_text(T("phone_not_yours"))
+        return
+    phone = "".join(ch for ch in c.phone_number if ch.isdigit())
+    save_phone(update.effective_user.id, phone)
+    ok = phone.startswith("213") and len(phone) == 12
+    await update.message.reply_text(T("phone_ok" if ok else "phone_not_dz"), reply_markup=ReplyKeyboardRemove())
+
+
+async def cmd_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton(T("btn_share_phone"), request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await update.message.reply_text(T("phone_ask"), reply_markup=kb)
+
+
+WEB_HTML = r"""<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Shop</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js"></script>
+<style>
+:root{--bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#17181a);--hint:var(--tg-theme-hint-color,#7d838c);--btn:var(--tg-theme-button-color,#2a8cff);--btx:var(--tg-theme-button-text-color,#fff);--card:var(--tg-theme-secondary-bg-color,#f1f3f7);--line:rgba(127,127,127,.22)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0}
+body{background:var(--bg);color:var(--tx);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Tahoma,sans-serif;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+.wrap{padding:14px 14px 20px;max-width:640px;margin:0 auto}
+h1{font-size:22px;margin:4px 0 12px}
+h2{font-size:19px;margin:6px 0 10px}
+.hint{color:var(--hint);font-size:13px}
+.scroller{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -14px 14px;padding:0 14px;scrollbar-width:none}
+.scroller::-webkit-scrollbar{display:none}
+.slide{flex:0 0 100%;scroll-snap-align:center;border-radius:18px;overflow:hidden;background:var(--card);aspect-ratio:16/10}
+.slide img,.slide video{width:100%;height:100%;object-fit:cover;display:block}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.card{background:var(--card);border-radius:18px;overflow:hidden;cursor:pointer;position:relative;display:flex;flex-direction:column}
+.card:active{transform:scale(.98)}
+.thumb{aspect-ratio:1/1;background:rgba(127,127,127,.12);display:flex;align-items:center;justify-content:center;font-size:44px;position:relative;overflow:hidden}
+.thumb img,.thumb video{width:100%;height:100%;object-fit:cover}
+.play{position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,.55);color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px}
+.info{padding:10px 12px 12px}
+.name{font-weight:600;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--bg);border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
+.badge{position:absolute;top:8px;inset-inline-start:8px;z-index:2;background:#e5484d;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px}
+button{font:inherit;border:0;border-radius:14px;padding:14px 16px;width:100%;cursor:pointer;margin-top:10px;font-weight:600}
+button.primary{background:var(--btn);color:var(--btx)}
+button.secondary{background:var(--card);color:var(--tx)}
+button:disabled{opacity:.5}
+label{display:block;margin:14px 0 6px;font-weight:600}
+input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.err{color:#e5484d;margin-top:10px}
+.ok{background:var(--card);border-radius:12px;padding:12px;margin-top:6px}
+.desc{white-space:pre-wrap;margin:10px 0}
+.kv{background:var(--card);border-radius:12px;padding:10px 12px;margin-top:6px;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:13px;direction:ltr;text-align:left}
+.center{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:70vh;padding:20px}
+.big{font-size:56px}
+.spin{width:36px;height:36px;border:4px solid var(--line);border-top-color:var(--btn);border-radius:50%;animation:s 1s linear infinite;margin-bottom:12px}
+@keyframes s{to{transform:rotate(360deg)}}
+#toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);background:rgba(20,20,20,.92);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90%;text-align:center;z-index:10}
+#toast.on{opacity:1}
+</style>
+</head>
+<body>
+<div id="app"><div class="center"><div class="spin"></div></div></div>
+<div id="toast"></div>
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+const SID = location.pathname.split('/').pop();
+const app = document.getElementById('app');
+
+const I18N = {
+  ar: {
+    empty:'لا توجد منتجات حالياً.', digital:'💾 منتج رقمي — يصلك مباشرة بعد الدفع', stock:'المتوفر',
+    sold:'نفدت الكمية', held:'محجوز لزبون آخر حالياً، جرّب بعد قليل.', unavailable:'غير متاح حالياً',
+    buy:'🛒 اشتري الآن', wilaya:'الولاية', pick:'اختر ولايتك', address:'العنوان الكامل للتوصيل',
+    share_phone:'مشاركة رقم هاتفي', phone_old:'حدّث تيليجرام، أو افتح محادثة البوت واكتب /phone ثم شارك رقمك.',
+    need_phone:'شارك رقم هاتفك الجزائري (+213) أولاً.', phone_hint:'للتأكد أنك من الجزائر',
+    pay_stars:'الدفع بالنجوم', pay_ton:'الدفع بـ TON', connect:'💎 ربط المحفظة', pay_ton_btn:'ادفع',
+    open_tk:'فتح Tonkeeper', check:'🔄 تحقق من الدفع', ton_wait:'لم يصل التحويل بعد، انتظر قليلاً.',
+    ton_title:'الدفع بعملة TON', amount:'المبلغ', addr:'العنوان', memo:'التعليق (إلزامي، لا تغيّره)', copied:'تم النسخ',
+    ton_hint:'اربط محفظتك واضغط «ادفع»، أو حوّل يدوياً بنفس المبلغ والتعليق. يتأكد البوت تلقائياً.',
+    paid_title:'تم الدفع بنجاح!', paid_msg:'وصلتك تفاصيل الطلب (والمنتج الرقمي إن وُجد) في محادثة البوت.',
+    wait_title:'جارٍ تأكيد الدفع…', wait_msg:'لحظات من فضلك.', failed:'لم تكتمل العملية.',
+    back_shop:'العودة للمتجر', net_err:'تعذّر الاتصال، حاول مجدداً.', cancelled:'تم إلغاء الدفع.',
+    open_tg:'افتح المتجر من داخل تيليجرام.', order:'رقم الطلب', ship_dz:'🇩🇿 البيع والتوصيل داخل الجزائر فقط'
+  },
+  en: {
+    empty:'No products available right now.', digital:'💾 Digital product — delivered right after payment', stock:'In stock',
+    sold:'Sold out', held:'Reserved for another customer right now, try again shortly.', unavailable:'Currently unavailable',
+    buy:'🛒 Buy now', wilaya:'Wilaya (province)', pick:'Choose your wilaya', address:'Full delivery address',
+    share_phone:'Share my phone number', phone_old:'Update Telegram, or open the bot chat, send /phone and share your number.',
+    need_phone:'Share your Algerian (+213) phone number first.', phone_hint:'To confirm you are in Algeria',
+    pay_stars:'Pay with Stars', pay_ton:'Pay with TON', connect:'💎 Connect wallet', pay_ton_btn:'Pay',
+    open_tk:'Open Tonkeeper', check:'🔄 Check payment', ton_wait:'Transfer not received yet, wait a bit.',
+    ton_title:'Pay with TON', amount:'Amount', addr:'Address', memo:'Comment (required, do not change)', copied:'Copied',
+    ton_hint:'Connect your wallet and tap “Pay”, or transfer manually with the same amount and comment. The bot confirms automatically.',
+    paid_title:'Payment successful!', paid_msg:'Your order details (and the digital product, if any) were sent to the bot chat.',
+    wait_title:'Confirming payment…', wait_msg:'Just a moment.', failed:'The operation was not completed.',
+    back_shop:'Back to shop', net_err:'Connection failed, please try again.', cancelled:'Payment cancelled.',
+    open_tg:'Open the shop from inside Telegram.', order:'Order number', ship_dz:'🇩🇿 Sales and delivery inside Algeria only'
+  }
+};
+let L = 'ar', S = null, tcUI = null, stack = ['home'];
+const st = {p:null, form:null, oid:null, ton:null, timer:null};
+const t = k => (I18N[L] && I18N[L][k]) || I18N.ar[k] || k;
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+if (tg) { tg.ready(); tg.expand(); }
+
+async function api(path, opts) {
+  opts = opts || {};
+  const r = await fetch('/api/' + SID + path, {
+    method: opts.method || 'GET', body: opts.body,
+    headers: {'X-Init-Data': tg.initData, 'Content-Type': 'application/json'}
+  });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+function toast(m) {
+  const el = document.getElementById('toast');
+  el.textContent = m; el.classList.add('on');
+  clearTimeout(toast.tm); toast.tm = setTimeout(() => el.classList.remove('on'), 2200);
+}
+function haptic() { try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {} }
+
+/* ── التنقل ── */
+function show(name, replace) { if (replace) stack = [name]; else stack.push(name); render(); }
+function back() { if (stack.length > 1) { stack.pop(); render(); } }
+function render() {
+  clearInterval(st.timer);
+  const v = stack[stack.length - 1];
+  views[v]();
+  try {
+    if (stack.length > 1 && ['wait','done','failed'].indexOf(v) < 0) tg.BackButton.show(); else tg.BackButton.hide();
+  } catch (e) {}
+  window.scrollTo(0, 0);
+}
+async function reload() { try { await load(); } catch (e) {} stack = ['home']; render(); }
+
+/* ── عناصر مشتركة ── */
+function media(m, attrs) {
+  return m.kind === 'video'
+    ? '<video src="' + m.url + '" ' + (attrs || 'controls') + ' playsinline preload="metadata"></video>'
+    : '<img src="' + m.url + '" loading="lazy" alt="">';
+}
+function chips(p) {
+  let h = '';
+  if (p.price != null) h += '<span class="chip">⭐ ' + p.price + '</span>';
+  if (p.price_ton != null) h += '<span class="chip">💎 ' + p.price_ton + ' TON</span>';
+  return '<div class="chips">' + h + '</div>';
+}
+
+/* ── الصفحات ── */
+function vHome() {
+  const ban = S.banner.length
+    ? '<div class="scroller">' + S.banner.map(m => '<div class="slide">' + media(m) + '</div>').join('') + '</div>' : '';
+  const cards = S.products.map(p => {
+    const m = p.media[0];
+    const th = m ? media(m, 'muted') + (m.kind === 'video' ? '<span class="play">▶</span>' : '') : (p.shipping ? '🛍' : '💾');
+    const bad = p.state !== 'available' ? '<span class="badge">' + t('sold') + '</span>' : '';
+    return '<div class="card" onclick="openProduct(' + p.id + ')">' + bad + '<div class="thumb">' + th + '</div>' +
+      '<div class="info"><div class="name">' + esc(p.name) + '</div>' + chips(p) + '</div></div>';
+  }).join('');
+  app.innerHTML = '<div class="wrap"><h1>' + esc(S.title) + '</h1>' + ban +
+    (cards ? '<div class="grid">' + cards + '</div>' : '<p class="hint">' + t('empty') + '</p>') + '</div>';
+}
+
+function openProduct(id) { st.p = S.products.find(x => x.id === id); show('product'); }
+
+function vProduct() {
+  const p = st.p;
+  const gal = p.media.length
+    ? '<div class="scroller">' + p.media.map(m => '<div class="slide" style="aspect-ratio:1/1">' + media(m) + '</div>').join('') + '</div>' : '';
+  const ok = p.state === 'available' && p.methods.length;
+  const note = p.state === 'sold' ? t('sold') : (p.state === 'held' ? t('held') : t('unavailable'));
+  const line = p.shipping ? ((p.stock >= 0 ? t('stock') + ': ' + p.stock + ' · ' : '') + t('ship_dz')) : t('digital');
+  app.innerHTML = '<div class="wrap">' + gal + '<h2>' + esc(p.name) + '</h2>' + chips(p) +
+    (p.description ? '<div class="desc">' + esc(p.description) + '</div>' : '') +
+    '<p class="hint">' + line + '</p>' +
+    (ok ? '<button class="primary" onclick="toCheckout()">' + t('buy') + '</button>' : '<p class="err">' + note + '</p>') + '</div>';
+}
+
+function toCheckout() {
+  st.form = {wilaya: '', address: '', extras: st.p.extras.map(() => '')};
+  show('checkout');
+}
+
+function phoneHtml() {
+  if (S.phone) return '<div class="ok">📱 +' + esc(S.phone) + ' ✅</div>';
+  return '<p class="hint">🇩🇿 ' + t('phone_hint') + '</p><button class="secondary" onclick="askPhone()">📱 ' + t('share_phone') + '</button>';
+}
+function askPhone() {
+  if (!tg.requestContact) { tg.showAlert(t('phone_old')); return; }
+  tg.requestContact(() => pollPhone(0));
+}
+async function pollPhone(n) {
+  try {
+    const r = await api('/phone');
+    if (r.phone) { S.phone = r.phone; const b = document.getElementById('phoneBox'); if (b) b.innerHTML = phoneHtml(); return; }
+  } catch (e) {}
+  if (n < 20) setTimeout(() => pollPhone(n + 1), 1500);
+}
+
+function vCheckout() {
+  const p = st.p, f = st.form;
+  let h = '<div class="wrap"><h2>' + esc(p.name) + '</h2>' + chips(p);
+  if (p.shipping) {
+    h += '<div id="phoneBox" style="margin-top:12px">' + phoneHtml() + '</div>';
+    h += '<label>' + t('wilaya') + '</label><select onchange="st.form.wilaya=this.value"><option value="">' + t('pick') + '</option>' +
+      S.wilayas.map((w, i) => '<option value="' + (i + 1) + '"' + (String(f.wilaya) === String(i + 1) ? ' selected' : '') + '>' +
+        String(i + 1).padStart(2, '0') + ' ' + esc(w) + '</option>').join('') + '</select>';
+    h += '<label>' + t('address') + '</label><textarea rows="3" oninput="st.form.address=this.value">' + esc(f.address) + '</textarea>';
+  } else {
+    h += '<p class="hint" style="margin-top:12px">' + t('digital') + '</p>';
+  }
+  p.extras.forEach((x, i) => {
+    h += '<label>🧩 ' + esc(x.label) + '</label><input data-i="' + i + '"' + (x.kind === 'number' ? ' inputmode="numeric"' : '') +
+      ' value="' + esc(f.extras[i]) + '" oninput="st.form.extras[' + i + ']=this.value">' +
+      (x.rules.length ? '<div class="hint">' + x.rules.map(esc).join(' · ') + '</div>' : '');
+  });
+  h += '<div id="err" class="err"></div><div id="payBtns">';
+  p.methods.forEach(m => {
+    h += '<button class="primary" onclick="pay(\'' + m + '\')">' +
+      (m === 'stars' ? '⭐ ' + t('pay_stars') + ' (' + p.price + ')' : '💎 ' + t('pay_ton') + ' (' + p.price_ton + ' TON)') + '</button>';
+  });
+  app.innerHTML = h + '</div></div>';
+}
+
+function lock(on) { document.querySelectorAll('#payBtns button').forEach(b => b.disabled = on); }
+function errText(r) { return r.code === 'phone' ? t('need_phone') : (r.error || t('net_err')); }
+
+async function pay(method) {
+  const p = st.p, f = st.form, err = document.getElementById('err');
+  err.textContent = ''; lock(true);
+  try {
+    const r = await api('/order', {method: 'POST', body: JSON.stringify(
+      {pid: p.id, method: method, wilaya: f.wilaya, address: f.address, extras: f.extras})});
+    if (!r.ok) {
+      err.textContent = errText(r); lock(false);
+      if (r.code === 'extra') { const el = document.querySelector('[data-i="' + r.index + '"]'); if (el) el.focus(); }
+      return;
+    }
+    st.oid = r.oid;
+    if (method === 'stars') {
+      tg.openInvoice(r.invoice, s => {
+        if (s === 'paid' || s === 'pending') waitPaid();
+        else { lock(false); if (s === 'cancelled') toast(t('cancelled')); else err.textContent = t('failed'); }
+      });
+    } else {
+      st.ton = r.ton; show('ton'); startPoll();
+    }
+  } catch (e) { err.textContent = t('net_err'); lock(false); }
+}
+
+function startPoll() {
+  clearInterval(st.timer);
+  let n = 0;
+  st.timer = setInterval(async () => {
+    n++;
+    try {
+      const r = await api('/order/' + st.oid);
+      if (r.status === 'paid' || r.status === 'shipped') { clearInterval(st.timer); haptic(); show('done', true); }
+      else if (r.status === 'refunded' || r.status === 'cancelled') { clearInterval(st.timer); show('failed', true); }
+    } catch (e) {}
+    if (n > 180) clearInterval(st.timer);
+  }, 2500);
+}
+function waitPaid() { show('wait', true); startPoll(); }
+
+/* ── TON داخل التطبيق (TON Connect) ── */
+function vTon() {
+  const x = st.ton;
+  app.innerHTML = '<div class="wrap"><h2>💎 ' + t('ton_title') + '</h2><p class="hint">' + t('ton_hint') + '</p>' +
+    '<label>' + t('amount') + '</label><div class="kv" onclick="cp(\'' + esc(x.amount) + '\')">' + esc(x.amount) + ' TON</div>' +
+    '<label>' + t('addr') + '</label><div class="kv" onclick="cp(\'' + esc(x.address) + '\')">' + esc(x.address) + '</div>' +
+    '<label>' + t('memo') + '</label><div class="kv" onclick="cp(\'' + esc(x.memo) + '\')">' + esc(x.memo) + '</div>' +
+    '<button class="primary" id="tonBtn" onclick="tonPay()">' + t('connect') + '</button>' +
+    '<button class="secondary" onclick="tg.openLink(st.ton.url)">' + t('open_tk') + '</button>' +
+    '<button class="secondary" onclick="checkTon()">' + t('check') + '</button></div>';
+  setupTC();
+}
+function setupTC() {
+  if (!window.TON_CONNECT_UI) return;
+  if (!tcUI) {
+    tcUI = new TON_CONNECT_UI.TonConnectUI({
+      manifestUrl: location.origin + '/tonconnect-manifest.json',
+      actionsConfiguration: {twaReturnUrl: 'https://t.me/' + S.bot}
+    });
+    tcUI.onStatusChange(() => tonLabel());
+  }
+  tcUI.connectionRestored.then(tonLabel);
+  tonLabel();
+}
+function tonLabel() {
+  const b = document.getElementById('tonBtn');
+  if (b && tcUI && st.ton) b.textContent = tcUI.connected ? ('💎 ' + t('pay_ton_btn') + ' ' + st.ton.amount + ' TON') : t('connect');
+}
+async function tonPay() {
+  if (!tcUI) { tg.openLink(st.ton.url); return; }
+  try {
+    if (!tcUI.connected) { await tcUI.openModal(); return; }
+    await tcUI.sendTransaction({
+      validUntil: Math.floor(Date.now() / 1000) + 600,
+      messages: [{address: st.ton.address, amount: st.ton.nano, payload: st.ton.payload}]
+    });
+    toast(t('wait_title'));
+  } catch (e) {}
+}
+async function checkTon() {
+  try {
+    const r = await api('/order/' + st.oid + '/check', {method: 'POST'});
+    if (r.status === 'paid' || r.status === 'shipped') { haptic(); show('done', true); } else toast(t('ton_wait'));
+  } catch (e) { toast(t('net_err')); }
+}
+function cp(x) { try { navigator.clipboard.writeText(x).then(() => toast(t('copied'))); } catch (e) {} }
+
+function vWait() {
+  app.innerHTML = '<div class="center"><div class="spin"></div><h2>' + t('wait_title') + '</h2><p class="hint">' + t('wait_msg') + '</p></div>';
+}
+function vDone() {
+  app.innerHTML = '<div class="center"><div class="big">✅</div><h2>' + t('paid_title') + '</h2><p class="hint">' + t('order') +
+    ' #' + st.oid + '<br>' + t('paid_msg') + '</p><button class="primary" onclick="reload()">' + t('back_shop') + '</button></div>';
+}
+function vFailed() {
+  app.innerHTML = '<div class="center"><div class="big">❌</div><h2>' + t('failed') + '</h2>' +
+    '<button class="primary" onclick="reload()">' + t('back_shop') + '</button></div>';
+}
+const views = {home: vHome, product: vProduct, checkout: vCheckout, ton: vTon, wait: vWait, done: vDone, failed: vFailed};
+
+async function load() {
+  S = await api('/home');
+  L = S.lang;
+  document.documentElement.lang = L;
+  document.documentElement.dir = L === 'ar' ? 'rtl' : 'ltr';
+}
+(async () => {
+  if (!tg || !tg.initData) {
+    app.innerHTML = '<div class="center"><p>' + I18N.ar.open_tg + '<br>' + I18N.en.open_tg + '</p></div>';
+    return;
+  }
+  try { if (tg.BackButton) tg.BackButton.onClick(back); } catch (e) {}
+  try { await load(); render(); }
+  catch (e) { app.innerHTML = '<div class="center"><p>' + t('net_err') + '</p></div>'; }
+})();
+</script>
+</body>
+</html>
+"""
+
+
 def admin_commands(lang, is_main):
     cmds = [
         BotCommand("addproduct", T("cmd_addproduct", lang)),
@@ -2992,6 +3736,12 @@ async def setup_commands(bot, admin_id, sid):
             await bot.set_my_commands(cmds, scope=BotCommandScopeDefault(), language_code=lg)
     except Exception as e:
         log.warning("default set_my_commands failed: %s", e)
+    if WEBAPP_URL:
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
+                text=T("menu_btn", get_shop_lang(sid)), web_app=WebAppInfo(url=webapp_url(sid))))
+        except Exception as e:
+            log.warning("set_chat_menu_button failed: %s", e)
     await set_admin_commands(bot, admin_id, sid)
 
 
@@ -3007,6 +3757,9 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app: Application):
+    global MAIN_APP
+    MAIN_APP = app
+    await start_web()
     await setup_commands(app.bot, ADMIN_ID, 0)
     await load_shops()
     if not ADMIN_ID:
@@ -3029,6 +3782,7 @@ async def post_init(app: Application):
 
 
 async def post_shutdown(app: Application):
+    await stop_web()
     for bid in list(RUNNING):
         await stop_shop(bid)
 
@@ -3116,6 +3870,8 @@ def register_handlers(app: Application, is_main: bool):
 
     app.add_handler(admin_conv)
     app.add_handler(order_conv)
+    app.add_handler(MessageHandler(filters.CONTACT, global_contact))
+    app.add_handler(CommandHandler("phone", cmd_phone))
 
     # الزبون
     app.add_handler(CommandHandler("start", start))
