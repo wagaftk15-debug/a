@@ -3073,7 +3073,7 @@ async def load_shops():
 MAIN_APP = None       # Application الخاصة بالبوت الرئيسي
 WEB_RUNNER = None
 _DL_LOCKS = {}        # قفل لكل ملف وسائط (بدل قفل عام يُبطئ التحميل المتوازي)
-TG_JS = {"data": None, "ts": 0.0}
+TG_JS = {"data": None, "ts": 0.0, "fail": 0.0}
 TG_JS_URL = "https://telegram.org/js/telegram-web-app.js"
 
 
@@ -3278,12 +3278,17 @@ async def fetch_tg_js():
     now = time.time()
     if TG_JS["data"] and now - TG_JS["ts"] < 6 * 3600:
         return TG_JS["data"]
+    if now - TG_JS["fail"] < 120:          # فشل حديث: لا نعيد المحاولة في كل طلب
+        return TG_JS["data"]
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+        async with httpx.AsyncClient(timeout=4, follow_redirects=True) as c:
             r = await c.get(TG_JS_URL)
         if r.status_code == 200 and r.content:
             TG_JS["data"], TG_JS["ts"] = r.content, now
+        else:
+            TG_JS["fail"] = now
     except Exception as e:
+        TG_JS["fail"] = now
         log.warning("tg.js fetch failed: %s", e)
     return TG_JS["data"]
 
@@ -3627,7 +3632,7 @@ WEB_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Shop</title>
-<script src="/tg.js" onerror="var s=document.createElement('script');s.src='https://telegram.org/js/telegram-web-app.js';document.head.appendChild(s)"></script>
+<script async src="/tg.js" onerror="var s=document.createElement('script');s.src='https://telegram.org/js/telegram-web-app.js';document.head.appendChild(s)"></script>
 <style>
 :root{--bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#17181a);--hint:var(--tg-theme-hint-color,#7d838c);--btn:var(--tg-theme-button-color,#2a8cff);--btx:var(--tg-theme-button-text-color,#fff);--card:var(--tg-theme-secondary-bg-color,#f1f3f7);--line:rgba(127,127,127,.22)}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
