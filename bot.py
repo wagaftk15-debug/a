@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import html
 import json
@@ -40,7 +41,7 @@ from telegram.ext import (
     ConversationHandler, PreCheckoutQueryHandler, ContextTypes, Defaults, TypeHandler, filters,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", stream=sys.stdout)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("shop-bot")
@@ -446,8 +447,8 @@ _S = [
     ("refund_fail", "فشل الاسترجاع: {err}", "Refund failed: {err}"),
     ("refund_ok", "💸 تم استرجاع {amount}⭐ للطلب #{id}.", "💸 Refunded {amount}⭐ for order #{id}."),
     ("help_admin",
-     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقول الزبون، سعر TON، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير لغة المتجر للجميع",
-     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer fields, TON price, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change the shop language (for everyone)"),
+     "🛠 <b>أوامر الأدمن</b>\n\n/addproduct — إضافة منتج جديد\n/products — إدارة المنتجات (تعديل، صور، شحن/رقمي، مخزون، حقول الزبون، سعر TON، إخفاء، حذف)\n/orders — الطلبات المدفوعة\n/shipped رقم — تم الشحن\n/refund رقم — استرجاع النجوم\n/lang — تغيير لغة المتجر للجميع\n/diag — فحص الموقع (Mini App)",
+     "🛠 <b>Admin commands</b>\n\n/addproduct — add a new product\n/products — manage products (edit, media, physical/digital, stock, customer fields, TON price, hide, delete)\n/orders — paid orders\n/shipped number — mark as shipped\n/refund number — refund the stars\n/lang — change the shop language (for everyone)\n/diag — Mini App health check"),
     ("help_multi",
      "\n\n🤖 <b>البوتات المتعددة</b>\nأرسل هنا <b>توكن بوت جديد</b> (من @BotFather) لربطه وتشغيله فوراً.\n/bots — البوتات المرتبطة\n/delbot ID — فصل بوت وإيقافه",
      "\n\n🤖 <b>Multiple bots</b>\nSend a <b>new bot token</b> (from @BotFather) here to link and start it right away.\n/bots — linked bots\n/delbot ID — unlink and stop a bot"),
@@ -481,6 +482,7 @@ _S = [
     ("cmd_setwallet", "💎 محفظة TON", "💎 TON wallet"),
     ("cmd_bots", "🤖 البوتات المرتبطة", "🤖 Linked bots"),
     ("cmd_delbot", "🗑 فصل بوت (ID)", "🗑 Unlink a bot (ID)"),
+    ("cmd_diag", "🩺 فحص الموقع", "🩺 Mini App check"),
 
     # ── رسالة بدء التشغيل ──
     ("su_ok", "✅ البوت يعمل.\n", "✅ The bot is running.\n"),
@@ -600,7 +602,10 @@ def init_db():
     urls = [os.environ.get("DATABASE_URL"), os.environ.get("DATABASE_PUBLIC_URL")]
     for u in [x for x in urls if x]:
         try:
-            pool = ThreadedConnectionPool(1, 8, u, connect_timeout=8)
+            pool = ThreadedConnectionPool(
+                2, 12, u, connect_timeout=8,
+                keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+            )
             USE_PG = True
             log.info("Connected to PostgreSQL")
             break
@@ -610,6 +615,11 @@ def init_db():
     if not USE_PG:
         sqlite_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         sqlite_conn.row_factory = sqlite3.Row
+        try:
+            sqlite_conn.execute("PRAGMA journal_mode=WAL")
+            sqlite_conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception as e:
+            log.warning("sqlite pragma failed: %s", e)
         log.warning("Using SQLite file: %s", os.path.abspath(DB_PATH))
 
     pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -758,6 +768,24 @@ def init_db():
                         f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
                     )
 
+    # فهارس لتسريع الاستعلامات (آمنة: IF NOT EXISTS)
+    for ddl in (
+        "CREATE INDEX IF NOT EXISTS ix_prod_shop ON shop_products (shop_id, active)",
+        "CREATE INDEX IF NOT EXISTS ix_photo_prod ON shop_photos (product_id)",
+        "CREATE INDEX IF NOT EXISTS ix_ord_prod ON shop_orders (product_id, status, reserved_until)",
+        "CREATE INDEX IF NOT EXISTS ix_ord_shop ON shop_orders (shop_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_ord_user ON shop_orders (user_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_pf_prod ON shop_product_fields (product_id)",
+        "CREATE INDEX IF NOT EXISTS ix_pf_field ON shop_product_fields (field_id)",
+        "CREATE INDEX IF NOT EXISTS ix_fields_shop ON shop_fields (shop_id)",
+        "CREATE INDEX IF NOT EXISTS ix_media_shop ON shop_media (shop_id, unique_id)",
+    ):
+        try:
+            with cursor() as cur:
+                cur.execute(ddl)
+        except Exception as e:
+            log.warning("index failed: %s", str(e)[:120])
+
     migrate_legacy_extras()
     log.info("DB ready (%s)", "PostgreSQL" if USE_PG else "SQLite")
 
@@ -841,21 +869,34 @@ def set_shop_lang(sid, lang):
     _SHOP_LANG[sid] = lang
 
 
-# ── الإعدادات: محفظة TON (لكل متجر محفظته) ──
+# ── الإعدادات: محفظة TON (لكل متجر محفظته) — مع كاش قصير لتخفيف الاستعلامات ──
+_WALLET_CACHE = {}   # sid -> (expires, value)
+
+
 def get_wallet():
     """محفظة المتجر الحالي، وإلا محفظة البوت الرئيسي (تُستعمل لكل البوتات الفرعية)."""
-    for sid in (shop_id(), 0):
+    sid = shop_id()
+    hit = _WALLET_CACHE.get(sid)
+    now = time.time()
+    if hit and hit[0] > now:
+        return hit[1]
+    val = None
+    for s in (sid, 0):
         try:
-            v = _load_setting(f"ton_wallet_{sid}")
+            v = _load_setting(f"ton_wallet_{s}")
             if v:
-                return v
+                val = v
+                break
         except Exception as e:
             log.warning("get_wallet failed: %s", e)
-    return TON_WALLET
+    val = val or TON_WALLET
+    _WALLET_CACHE[sid] = (now + 15, val)
+    return val
 
 
 def set_wallet(w):
     _save_setting(f"ton_wallet_{shop_id()}", w)
+    _WALLET_CACHE.clear()
 
 
 # ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
@@ -917,7 +958,9 @@ def get_media(pid):
 
 
 def count_media(pid):
-    return len(get_media(pid))
+    with cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM shop_photos WHERE product_id=?", (pid,))
+        return cur.fetchone()["n"]
 
 
 def add_photo(pid, file_id, kind="photo"):
@@ -1843,6 +1886,17 @@ async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── TON: التحقق من التحويلات ──
+_TON_HTTP = None
+
+
+def ton_http():
+    """عميل HTTP مشترك (اتصال مُعاد استعماله بدل فتح اتصال جديد في كل فحص)."""
+    global _TON_HTTP
+    if _TON_HTTP is None or _TON_HTTP.is_closed:
+        _TON_HTTP = httpx.AsyncClient(timeout=15)
+    return _TON_HTTP
+
+
 async def find_ton_payment(wallet, oid, min_nano, since):
     """يبحث في آخر معاملات المحفظة عن تحويل بنفس التعليق وبمبلغ كافٍ. يرجع الهاش أو None."""
     if not wallet or not min_nano:
@@ -1851,8 +1905,7 @@ async def find_ton_payment(wallet, oid, min_nano, since):
     if TONCENTER_KEY:
         params["api_key"] = TONCENTER_KEY
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get("https://toncenter.com/api/v2/getTransactions", params=params)
+        r = await ton_http().get("https://toncenter.com/api/v2/getTransactions", params=params)
         data = r.json()
     except Exception as e:
         log.warning("toncenter request failed: %s", e)
@@ -1880,7 +1933,7 @@ async def find_ton_payment(wallet, oid, min_nano, since):
 
 async def settle_ton(context, o, tx_hash):
     charge = "ton_" + tx_hash
-    status, order = mark_paid(o["id"], charge)
+    status, order = await asyncio.to_thread(mark_paid, o["id"], charge)
     await finalize_paid(context, o["user_id"], o["id"], status, order, charge, stars=False)
     return status
 
@@ -1888,12 +1941,13 @@ async def settle_ton(context, o, tx_hash):
 async def watch_ton(context, oid):
     """يراقب المحفظة حتى 10 دقائق ثم يتوقف (يبقى زر «تحقق» متاحاً)."""
     try:
+        wallet = get_wallet()
         for _ in range(60):
             await asyncio.sleep(10)
-            o = get_order(oid)
+            o = await asyncio.to_thread(get_order, oid)
             if not o or o["status"] != "pending":
                 return
-            h = await find_ton_payment(get_wallet(), oid, o.get("ton_nano"), o.get("created_at"))
+            h = await find_ton_payment(wallet, oid, o.get("ton_nano"), o.get("created_at"))
             if h:
                 await settle_ton(context, o, h)
                 return
@@ -3014,14 +3068,13 @@ async def load_shops():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 12) قوائم الأوامر + التشغيل
-# ═════════════════════════════════════════════════════════════════════════════
-# ═════════════════════════════════════════════════════════════════════════════
-# 13) الموقع: Telegram Mini App (متجر داخل تيليجرام + دفع بالنجوم أو TON من داخله)
+# 12) الموقع: Telegram Mini App (متجر داخل تيليجرام + دفع بالنجوم أو TON من داخله)
 # ═════════════════════════════════════════════════════════════════════════════
 MAIN_APP = None       # Application الخاصة بالبوت الرئيسي
 WEB_RUNNER = None
-MEDIA_LOCK = None
+_DL_LOCKS = {}        # قفل لكل ملف وسائط (بدل قفل عام يُبطئ التحميل المتوازي)
+TG_JS = {"data": None, "ts": 0.0}
+TG_JS_URL = "https://telegram.org/js/telegram-web-app.js"
 
 
 def webapp_url(sid):
@@ -3083,32 +3136,32 @@ def media_url(sid, file_id):
     return f"/media/{sid}/{quote(file_id, safe='')}"
 
 
+# كاش مسموح الوسائط لكل متجر (بدل 3 استعلامات لكل صورة)
+_MEDIA_OK = {}   # sid -> (expires, set)
+
+
+def _build_media_set():
+    s = set()
+    with cursor() as cur:
+        cur.execute("SELECT ph.file_id FROM shop_photos ph JOIN shop_products p ON p.id=ph.product_id "
+                    "WHERE p.shop_id=?", (shop_id(),))
+        s.update(r["file_id"] for r in cur.fetchall())
+        cur.execute("SELECT file_id FROM shop_media WHERE shop_id=?", (shop_id(),))
+        s.update(r["file_id"] for r in cur.fetchall())
+    s.update(m.get("file_id") for m in get_list_media() if m.get("file_id"))
+    return s
+
+
 def media_allowed(file_id):
     """لا نخدم إلا ملفات تخص المتجر الحالي (منتجات / مكتبة / قائمة المنتجات)."""
-    with cursor() as cur:
-        cur.execute("SELECT 1 AS x FROM shop_photos ph JOIN shop_products p ON p.id=ph.product_id "
-                    "WHERE ph.file_id=? AND p.shop_id=? LIMIT 1", (file_id, shop_id()))
-        if cur.fetchone():
-            return True
-        cur.execute("SELECT 1 AS x FROM shop_media WHERE file_id=? AND shop_id=? LIMIT 1", (file_id, shop_id()))
-        if cur.fetchone():
-            return True
-    return any(m.get("file_id") == file_id for m in get_list_media())
-
-
-def product_json(p, uid, sid):
-    methods = pay_methods(p)
-    return {
-        "id": p["id"], "name": p["name"], "description": p["description"] or "",
-        "shipping": bool(p["shipping"]), "stock": p["stock"], "methods": methods,
-        "price": p["price"] if "stars" in methods else None,
-        "price_ton": fmt_ton(p["price_ton"]) if "ton" in methods else None,
-        "state": availability(p["id"], uid),
-        "media": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"]}
-                  for m in get_media(p["id"])[:MAX_PHOTOS]],
-        "extras": [{"id": f["id"], "label": f["label"], "kind": f.get("kind") or "text",
-                    "rules": [plain(r) for r in extra_rules(f)]} for f in list_extras(p["id"])],
-    }
+    sid, now = shop_id(), time.time()
+    hit = _MEDIA_OK.get(sid)
+    if hit and hit[0] > now and file_id in hit[1]:
+        return True
+    # غير موجود في الكاش (أو انتهى): أعد البناء مرة واحدة ثم احكم
+    s = _build_media_set()
+    _MEDIA_OK[sid] = (now + 60, s)
+    return file_id in s
 
 
 def load_home_data(uid, sid):
@@ -3130,6 +3183,14 @@ def load_home_data(uid, sid):
                     "AND reserved_until > ? AND user_id <> ? GROUP BY product_id", (sid, int(time.time()), uid))
         for r in cur.fetchall():
             held[r["product_id"]] = r["n"]
+    # حدّث كاش الوسائط المسموحة مجاناً من نفس البيانات
+    try:
+        ids = {m["file_id"] for lst in media.values() for m in lst}
+        ids.update(m.get("file_id") for m in get_list_media() if m.get("file_id"))
+        old = _MEDIA_OK.get(sid)
+        _MEDIA_OK[sid] = (time.time() + 60, ids | (old[1] if old else set()))
+    except Exception:
+        pass
     out = []
     for p in prods:
         methods = []
@@ -3158,7 +3219,7 @@ def load_home_data(uid, sid):
 
 
 async def web_auth(request):
-    """يتحقق من المستخدم ويضبط سياق المتجر/اللغة لهذا الطلب."""
+    """يتحقق من المستخدم ويضبط سياق المتجر/اللغة لهذا الطلب (دون حجب حلقة الأحداث)."""
     sid = int(request.match_info["sid"])
     app = shop_app(sid)
     if not app:
@@ -3168,12 +3229,27 @@ async def web_auth(request):
         raise web.HTTPUnauthorized()
     shop = app.bot_data["shop"]
     _shop.set(shop)
-    _lang.set(get_shop_lang(sid))
+    lang = _SHOP_LANG.get(sid)
+    if lang is None:
+        lang = await asyncio.to_thread(get_shop_lang, sid)
+    _lang.set(lang)
     return app, shop, user
 
 
 def _err(code, msg, **extra):
     return web.json_response({"ok": False, "code": code, "error": plain(msg), **extra})
+
+
+@web.middleware
+async def err_mw(request, handler):
+    """يسجّل أي خطأ غير متوقع في اللوغ ويرجع JSON بدل صفحة بيضاء."""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception:
+        log.exception("WEB ERROR on %s", request.path)
+        return web.json_response({"ok": False, "error": "server"}, status=500)
 
 
 async def web_health(request):
@@ -3186,6 +3262,29 @@ async def web_page(request):
     resp = web.Response(text=WEB_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
     resp.enable_compression()
     return resp
+
+
+async def fetch_tg_js():
+    """ينزّل سكربت تيليجرام مرة ويخزّنه (بعض الشبكات تبطئ telegram.org فيتعلّق التحميل)."""
+    now = time.time()
+    if TG_JS["data"] and now - TG_JS["ts"] < 6 * 3600:
+        return TG_JS["data"]
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            r = await c.get(TG_JS_URL)
+        if r.status_code == 200 and r.content:
+            TG_JS["data"], TG_JS["ts"] = r.content, now
+    except Exception as e:
+        log.warning("tg.js fetch failed: %s", e)
+    return TG_JS["data"]
+
+
+async def web_tgjs(request):
+    data = await fetch_tg_js()
+    if not data:
+        raise web.HTTPFound(TG_JS_URL)
+    return web.Response(body=data, content_type="application/javascript",
+                        headers={"Cache-Control": "public, max-age=3600"})
 
 
 async def web_home(request):
@@ -3211,61 +3310,83 @@ async def web_home(request):
 
 async def web_phone(request):
     app, shop, user = await web_auth(request)
-    return web.json_response({"phone": get_phone(user.id)})
+    return web.json_response({"phone": await asyncio.to_thread(get_phone, user.id)})
+
+
+def _create_order_sync(user, data):
+    """كل عمليات قاعدة البيانات لإنشاء الطلب. ترجع ((code,msg,extra), None) أو (None, نتيجة)."""
+    try:
+        pid = int(data.get("pid") or 0)
+    except Exception:
+        return ("bad_request", T("session_expired"), {}), None
+    method = data.get("method")
+    p = get_product(pid)
+    if not p or not p["active"]:
+        return ("gone", T("product_gone"), {}), None
+    if method not in pay_methods(p):
+        return ("method", T("no_pay_method"), {}), None
+    state = availability(pid, user.id)
+    if state != "available":
+        return (state, T("unavail_" + state), {}), None
+
+    phone = wilaya = address = None
+    if p["shipping"]:
+        phone = get_phone(user.id)
+        if not phone:
+            return ("phone", T("phone_ask"), {}), None
+        if not (phone.startswith("213") and len(phone) == 12):
+            return ("phone_dz", T("phone_not_dz"), {}), None
+        try:
+            idx = int(data.get("wilaya") or 0)
+        except (TypeError, ValueError):
+            idx = 0
+        if not 1 <= idx <= len(WILAYAS["ar"]):
+            return ("wilaya", T("pick_wilaya"), {}), None
+        wilaya = f"{idx:02d} - {WILAYAS['ar'][idx - 1]} / {WILAYAS['en'][idx - 1]}"
+        address = str(data.get("address") or "").strip()
+        if not (10 <= len(address) <= 300):
+            return ("address", T("addr_bad"), {}), None
+
+    extras = list_extras(pid)
+    vals = data.get("extras") or []
+    if not isinstance(vals, list) or len(vals) != len(extras):
+        return ("extras", T("session_expired"), {}), None
+    pairs = []
+    for i, (f, v) in enumerate(zip(extras, vals)):
+        val, e = check_extra(f, str(v))
+        if e:
+            return ("extra", e, {"index": i}), None
+        pairs.append({"label": f["label"], "value": val})
+
+    oid, why = place_order(user, pid, phone, wilaya, address, pairs)
+    if not oid:
+        return (why, T("unavail_" + (why if why in ("sold", "held") else "sold")), {}), None
+    order = get_order(oid)
+
+    if method == "ton":
+        wallet = get_wallet()
+        if not (wallet and p.get("price_ton")):
+            set_order(oid, "cancelled")
+            return ("method", T("no_pay_method"), {}), None
+        nano = to_nano(p["price_ton"])
+        with cursor() as cur:
+            cur.execute("UPDATE shop_orders SET ton_nano=? WHERE id=?", (nano, oid))
+        return None, (p, oid, order, nano, wallet)
+    return None, (p, oid, order, None, None)
 
 
 async def web_order(request):
     app, shop, user = await web_auth(request)
     try:
         data = await request.json()
-        pid = int(data.get("pid") or 0)
     except Exception:
         return _err("bad_request", T("session_expired"))
-    method = data.get("method")
-    p = get_product(pid)
-    if not p or not p["active"]:
-        return _err("gone", T("product_gone"))
-    if method not in pay_methods(p):
-        return _err("method", T("no_pay_method"))
-    state = availability(pid, user.id)
-    if state != "available":
-        return _err(state, T("unavail_" + state))
+    err, res = await asyncio.to_thread(_create_order_sync, user, data)
+    if err:
+        return _err(err[0], err[1], **err[2])
+    p, oid, order, nano, wallet = res
 
-    phone = wilaya = address = None
-    if p["shipping"]:
-        phone = get_phone(user.id)
-        if not phone:
-            return _err("phone", T("phone_ask"))
-        if not (phone.startswith("213") and len(phone) == 12):
-            return _err("phone_dz", T("phone_not_dz"))
-        try:
-            idx = int(data.get("wilaya") or 0)
-        except (TypeError, ValueError):
-            idx = 0
-        if not 1 <= idx <= len(WILAYAS["ar"]):
-            return _err("wilaya", T("pick_wilaya"))
-        wilaya = f"{idx:02d} - {WILAYAS['ar'][idx - 1]} / {WILAYAS['en'][idx - 1]}"
-        address = str(data.get("address") or "").strip()
-        if not (10 <= len(address) <= 300):
-            return _err("address", T("addr_bad"))
-
-    extras = list_extras(pid)
-    vals = data.get("extras") or []
-    if not isinstance(vals, list) or len(vals) != len(extras):
-        return _err("extras", T("session_expired"))
-    pairs = []
-    for i, (f, v) in enumerate(zip(extras, vals)):
-        val, e = check_extra(f, str(v))
-        if e:
-            return _err("extra", e, index=i)
-        pairs.append({"label": f["label"], "value": val})
-
-    oid, why = place_order(user, pid, phone, wilaya, address, pairs)
-    if not oid:
-        return _err(why, T("unavail_" + (why if why in ("sold", "held") else "sold")))
-    order = get_order(oid)
-
-    if method == "stars":
+    if data.get("method") == "stars":
         desc = T("invoice_ship_desc", name=p["name"]) if p["shipping"] else (p["description"] or p["name"])
         try:
             link = await app.bot.create_invoice_link(
@@ -3275,17 +3396,10 @@ async def web_order(request):
             )
         except Exception as e:
             log.error("create_invoice_link failed: %s", e)
-            set_order(oid, "cancelled")
+            await asyncio.to_thread(set_order, oid, "cancelled")
             return _err("invoice", T("session_expired"))
         return web.json_response({"ok": True, "oid": oid, "method": "stars", "invoice": link})
 
-    wallet = get_wallet()
-    if not (wallet and p.get("price_ton")):
-        set_order(oid, "cancelled")
-        return _err("method", T("no_pay_method"))
-    nano = to_nano(p["price_ton"])
-    with cursor() as cur:
-        cur.execute("UPDATE shop_orders SET ton_nano=? WHERE id=?", (nano, oid))
     memo = ton_memo(oid)
     task = asyncio.create_task(watch_ton(_Ctx(app.bot), oid))
     TON_TASKS.add(task)
@@ -3299,7 +3413,7 @@ async def web_order(request):
 
 async def web_status(request):
     app, shop, user = await web_auth(request)
-    o = get_order(int(request.match_info["oid"]))
+    o = await asyncio.to_thread(get_order, int(request.match_info["oid"]))
     if not o or o["user_id"] != user.id:
         raise web.HTTPNotFound()
     return web.json_response({"status": o["status"], "oid": o["id"]})
@@ -3309,14 +3423,15 @@ async def web_check(request):
     """زر «تحقق من الدفع» لطلبات TON."""
     app, shop, user = await web_auth(request)
     oid = int(request.match_info["oid"])
-    o = get_order(oid)
+    o = await asyncio.to_thread(get_order, oid)
     if not o or o["user_id"] != user.id:
         raise web.HTTPNotFound()
     if o["status"] == "pending" and o.get("ton_nano"):
-        h = await find_ton_payment(get_wallet(), oid, o.get("ton_nano"), o.get("created_at"))
+        wallet = await asyncio.to_thread(get_wallet)
+        h = await find_ton_payment(wallet, oid, o.get("ton_nano"), o.get("created_at"))
         if h:
             await settle_ton(_Ctx(app.bot), o, h)
-            o = get_order(oid)
+            o = await asyncio.to_thread(get_order, oid)
     return web.json_response({"status": o["status"], "oid": oid})
 
 
@@ -3335,27 +3450,31 @@ async def web_media(request):
     if not app:
         raise web.HTTPNotFound()
     _shop.set(app.bot_data["shop"])
-    if not media_allowed(fid):
+    if not await asyncio.to_thread(media_allowed, fid):
         raise web.HTTPNotFound()
     base = os.path.join(MEDIA_DIR, hashlib.sha1(f"{sid}:{fid}".encode()).hexdigest())
 
     def cached():
-        return [x for x in glob.glob(base + ".*") if not x.endswith(".part")]
+        return [x for x in glob.glob(base + ".*") if not x.endswith(".part") and "_w" not in os.path.basename(x)]
 
-    found = cached()
+    found = await asyncio.to_thread(cached)
     if not found:
-        async with MEDIA_LOCK:
-            found = cached()
-            if not found:
-                try:
-                    f = await app.bot.get_file(fid)
-                    ext = os.path.splitext(f.file_path or "")[1] or ".bin"
-                    await f.download_to_drive(custom_path=base + ".part")
-                    os.replace(base + ".part", base + ext)
-                    found = [base + ext]
-                except Exception as e:
-                    log.warning("media proxy failed: %s", e)
-                    raise web.HTTPNotFound()
+        lock = _DL_LOCKS.setdefault(base, asyncio.Lock())
+        try:
+            async with lock:
+                found = await asyncio.to_thread(cached)
+                if not found:
+                    try:
+                        f = await app.bot.get_file(fid)
+                        ext = os.path.splitext(f.file_path or "")[1] or ".bin"
+                        await f.download_to_drive(custom_path=base + ".part")
+                        os.replace(base + ".part", base + ext)
+                        found = [base + ext]
+                    except Exception as e:
+                        log.warning("media proxy failed: %s", e)
+                        raise web.HTTPNotFound()
+        finally:
+            _DL_LOCKS.pop(base, None)
     path = found[0]
     try:
         w = int(request.query.get("w", 0))
@@ -3373,7 +3492,7 @@ async def web_media(request):
                 log.warning("thumb failed: %s", e)
                 dst = path
         path = dst
-    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=604800"})
+    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=604800, immutable"})
 
 
 async def web_manifest(request):
@@ -3390,9 +3509,10 @@ async def web_logo(request):
 
 
 def web_app_factory():
-    w = web.Application()
+    w = web.Application(middlewares=[err_mw])
     w.add_routes([
         web.get("/", web_health),
+        web.get("/tg.js", web_tgjs),
         web.get(r"/app/{sid:\d+}", web_page),
         web.get(r"/api/{sid:\d+}/home", web_home),
         web.get(r"/api/{sid:\d+}/phone", web_phone),
@@ -3407,7 +3527,7 @@ def web_app_factory():
 
 
 async def start_web():
-    global WEB_RUNNER, MEDIA_LOCK, WEBAPP_URL
+    global WEB_RUNNER, WEBAPP_URL
     if not WEBAPP_URL:
         log.info("WEBAPP_URL not set: Mini App disabled (classic bot flow only)")
         return
@@ -3416,15 +3536,15 @@ async def start_web():
         WEBAPP_URL = ""
         return
     try:
-        MEDIA_LOCK = asyncio.Lock()
         os.makedirs(MEDIA_DIR, exist_ok=True)
         runner = web.AppRunner(web_app_factory())
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", PORT).start()
         WEB_RUNNER = runner
-        log.info("Mini App listening on :%s (%s)", PORT, WEBAPP_URL)
+        log.info("Mini App listening on 0.0.0.0:%s (public URL: %s)", PORT, WEBAPP_URL)
         if not os.path.exists(LOGO_PATH):
             log.warning("Logo not found at %s (TON Connect icon). Put shop_logo.png next to bot.py", LOGO_PATH)
+        asyncio.create_task(fetch_tg_js())     # تسخين كاش سكربت تيليجرام
     except Exception as e:
         log.error("Mini App failed to start (%s) -> falling back to the classic bot flow", e)
         WEBAPP_URL = ""
@@ -3438,6 +3558,38 @@ async def stop_web():
         except Exception as e:
             log.warning("stop web failed: %s", e)
         WEB_RUNNER = None
+
+
+async def self_check():
+    """يطلب الرابط العام من الخارج ليتأكد أن الدومين/المنفذ يصلان فعلاً إلى هذا السيرفر."""
+    if not WEBAPP_URL:
+        return "🚫 WEBAPP_URL / RAILWAY_PUBLIC_DOMAIN غير مضبوط"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            r = await c.get(WEBAPP_URL + "/")
+        if r.status_code == 200 and r.text.strip() == "ok":
+            return "✅ الموقع يستجيب"
+        return f"⚠️ الرابط يرد HTTP {r.status_code} (تأكد أن Port الدومين في Railway = {PORT})"
+    except Exception as e:
+        return f"❌ تعذّر الوصول للرابط العام: {str(e)[:120]}"
+
+
+async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فحص سريع لسبب «فشل التحميل» للموقع."""
+    if not is_admin(update):
+        return
+    chk = await self_check()
+    tg_ok = "✅" if await fetch_tg_js() else "⚠️ (سيُستعمل telegram.org مباشرة)"
+    t = (
+        "🩺 <b>Mini App</b>\n\n"
+        f"URL: <code>{esc(webapp_url(shop_id()) if WEBAPP_URL else '—')}</code>\n"
+        f"PORT: <code>{PORT}</code>\n"
+        f"الفحص الخارجي: {esc(chk)}\n"
+        f"سكربت تيليجرام (tg.js): {tg_ok}\n"
+        f"الخادم يعمل: {'✅' if WEB_RUNNER else '❌'}\n"
+        f"قاعدة البيانات: {'PostgreSQL' if USE_PG else 'SQLite'}"
+    )
+    await update.message.reply_text(t)
 
 
 # ── مشاركة رقم الهاتف خارج محادثة الطلب (يستعملها الموقع عبر requestContact) ──
@@ -3466,7 +3618,7 @@ WEB_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Shop</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="/tg.js"></script>
 <style>
 :root{--bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#17181a);--hint:var(--tg-theme-hint-color,#7d838c);--btn:var(--tg-theme-button-color,#2a8cff);--btx:var(--tg-theme-button-text-color,#fff);--card:var(--tg-theme-secondary-bg-color,#f1f3f7);--line:rgba(127,127,127,.22)}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -3558,12 +3710,18 @@ if (tg) { tg.ready(); tg.expand(); }
 
 async function api(path, opts) {
   opts = opts || {};
-  const r = await fetch('/api/' + SID + path, {
-    method: opts.method || 'GET', body: opts.body,
-    headers: {'X-Init-Data': tg.initData, 'Content-Type': 'application/json'}
-  });
-  if (!r.ok) throw new Error(r.status);
-  return r.json();
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), 20000);
+  try {
+    const r = await fetch('/api/' + SID + path, {
+      method: opts.method || 'GET', body: opts.body, signal: ctl.signal,
+      headers: {'X-Init-Data': tg.initData, 'Content-Type': 'application/json'}
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  } catch (e) {
+    throw new Error(e.name === 'AbortError' ? 'timeout' : e.message);
+  } finally { clearTimeout(to); }
 }
 function toast(m) {
   const el = document.getElementById('toast');
@@ -3792,7 +3950,8 @@ function vFailed() {
 const views = {home: vHome, product: vProduct, checkout: vCheckout, ton: vTon, wait: vWait, done: vDone, failed: vFailed};
 
 async function load() {
-  S = await api('/home');
+  try { S = await api('/home'); }
+  catch (e) { S = await api('/home'); }          // إعادة محاولة واحدة تلقائياً
   L = S.lang;
   document.documentElement.lang = L;
   document.documentElement.dir = L === 'ar' ? 'rtl' : 'ltr';
@@ -3804,7 +3963,10 @@ async function load() {
   }
   try { if (tg.BackButton) tg.BackButton.onClick(back); } catch (e) {}
   try { await load(); render(); }
-  catch (e) { app.innerHTML = '<div class="center"><p>' + t('net_err') + '</p></div>'; }
+  catch (e) {
+    app.innerHTML = '<div class="center"><p>' + t('net_err') + '<br><small dir="ltr">' + esc(e.message) +
+      '</small></p><button class="primary" onclick="location.reload()">↻</button></div>';
+  }
 })();
 </script>
 </body>
@@ -3820,6 +3982,7 @@ def admin_commands(lang, is_main):
         BotCommand("shipped", T("cmd_shipped", lang)),
         BotCommand("refund", T("cmd_refund", lang)),
         BotCommand("setwallet", T("cmd_setwallet", lang)),
+        BotCommand("diag", T("cmd_diag", lang)),
         BotCommand("help", T("cmd_help", lang)),
         BotCommand("lang", T("cmd_lang", lang)),
         BotCommand("start", T("cmd_start", lang)),
@@ -3894,7 +4057,7 @@ async def post_init(app: Application):
     if RUNNING:
         msg += T("su_subs", L, n=len(RUNNING))
     if WEBAPP_URL:
-        msg += f"\n🌐 Mini App: {webapp_url(0)}"
+        msg += f"\n🌐 Mini App: {webapp_url(0)}\n{await self_check()}"
     msg += T("su_help", L)
     try:
         await app.bot.send_message(ADMIN_ID, msg)
@@ -3906,6 +4069,11 @@ async def post_shutdown(app: Application):
     await stop_web()
     for bid in list(RUNNING):
         await stop_shop(bid)
+    try:
+        if _TON_HTTP is not None and not _TON_HTTP.is_closed:
+            await _TON_HTTP.aclose()
+    except Exception:
+        pass
 
 
 def register_handlers(app: Application, is_main: bool):
@@ -4007,6 +4175,7 @@ def register_handlers(app: Application, is_main: bool):
 
     # الأدمن
     app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^setlang_(ar|en)$"))
     app.add_handler(CallbackQueryHandler(adm_list_cb, pattern=r"^adm_list$"))
     app.add_handler(CallbackQueryHandler(adm_cb, pattern=r"^adm_(panel|ship|active|offstars|offton|clrphotos|del|delyes)_\d+$"))
