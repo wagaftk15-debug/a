@@ -4,11 +4,10 @@ import re
 import html
 import json
 import hmac
-import glob
 import base64
 import hashlib
 from types import SimpleNamespace
-from urllib.parse import parse_qsl, quote, unquote
+from urllib.parse import parse_qsl
 import time
 import asyncio
 import sqlite3
@@ -19,16 +18,12 @@ from contextvars import ContextVar
 
 import httpx
 try:
-    from PIL import Image
-except ImportError:          # بدون Pillow تُخدم الصور بحجمها الأصلي
-    Image = None
-try:
     from aiohttp import web
 except ImportError:          # البوت يعمل بدون الموقع إذا لم تُثبَّت aiohttp
     web = None
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.pool import ThreadedConnectionPool, PoolError
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, LabeledPrice,
@@ -55,21 +50,22 @@ ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "0") or 0)
 DB_PATH = os.environ.get("DB_PATH", "shop.db")
 
 # ── TON ──
-TON_WALLET = os.environ.get("TON_WALLET", "")          # محفظة البوت الرئيسي (اختياري، أو استعمل /setwallet)
-TONCENTER_KEY = os.environ.get("TONCENTER_KEY", "")    # مفتاح مجاني من @tonapibot (اختياري لكن يُنصح به)
+TON_WALLET = os.environ.get("TON_WALLET", "")
+TONCENTER_KEY = os.environ.get("TONCENTER_KEY", "")
 WALLET_RE = re.compile(r"^(EQ|UQ)[A-Za-z0-9_-]{46}$")
 TOKEN_RE = re.compile(r"^\s*\d{6,12}:[A-Za-z0-9_-]{30,}\s*$")
 
 RESERVE_MINUTES = 10
 MAX_PHOTOS = 10
-MAX_EXTRA_LEN = 100   # أقصى طول يمكن للأدمن تحديده لحقل الزبون الرقمي
-MAX_EXTRAS = 10       # أقصى عدد حقول للمنتج الواحد
+MAX_EXTRA_LEN = 100
+MAX_EXTRAS = 10
 
 # ── الموقع (Telegram Mini App) ──
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")   # الرابط العام للموقع: https://your-domain
-PORT = int(os.environ.get("PORT", "8080") or 8080)
-MEDIA_DIR = os.environ.get("MEDIA_DIR", "/tmp/shop_media")  # تخزين مؤقت لصور/فيديوهات المنتجات
-# تطبيع الرابط: يضيف https:// إن نُسي، ويستعمل دومين Railway العام تلقائياً إن لم يُحدَّد WEBAPP_URL
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
+try:
+    PORT = int(os.environ.get("PORT", "8080") or 8080)
+except ValueError:
+    PORT = 8080
 _raw = (WEBAPP_URL or os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")).strip().rstrip("/")
 if _raw.startswith("http://"):
     _raw = "https://" + _raw[len("http://"):]
@@ -78,7 +74,6 @@ elif _raw and not _raw.startswith("https://"):
 WEBAPP_URL = _raw
 LOGO_PATH = os.environ.get("LOGO_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "shop_logo.png"))
 
-# اللغة الافتراضية: ar أو en
 LANGS = ("ar", "en")
 DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "ar").lower()
 if DEFAULT_LANG not in LANGS:
@@ -91,7 +86,7 @@ A_NAME, A_PRICE, A_TYPE, A_STOCK, A_DESC, A_PHOTOS, A_DELIV, E_VALUE, X_LABEL, X
 W_ADDR, A_TON, A_METHOD = 30, 31, 32
 X_LEN, X_PRE, X_SUF = 33, 34, 35
 M_UP = 36
-LIB_PAGE = 8   # عدد عناصر المكتبة في الصفحة
+LIB_PAGE = 8
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
@@ -245,7 +240,6 @@ _S = [
      "💎 Now send your <b>TON wallet address</b> (starts with UQ or EQ).\nIn Tonkeeper: tap Receive and copy the address.\nCurrent: <code>{w}</code>\n(to cancel: /cancel)"),
     ("ask_ton", "💎 اكتب سعر المنتج بعملة TON (مثال: 1.5):",
      "💎 Type the product price in TON (e.g. 1.5):"),
-    # طرق الدفع
     ("pick_method", "💳 اختر <b>طريقة الدفع</b> لهذا المنتج:", "💳 Choose the <b>payment method</b> for this product:"),
     ("b_pm_stars", "⭐ نجوم تيليجرام فقط", "⭐ Telegram Stars only"),
     ("b_pm_ton", "💎 TON فقط", "💎 TON only"),
@@ -261,7 +255,6 @@ _S = [
     ("b_off_ton", "🗑 حذف دفع TON", "🗑 Remove TON"),
     ("ton_no_pending", "لا يوجد طلب دفع TON معلّق لك. اضغط «اشتري الآن» من /start.",
      "You have no pending TON order. Tap “Buy now” from /start."),
-    # كلمات يكتبها الزبون ليقول إنه دفع (مفصولة بـ | ، تُجمع من كل اللغات)
     ("paid_words", "دفعت|حولت|حوّلت|تم الدفع|تم التحويل", "paid|sent|transferred|done|payment done"),
     ("help_ton", "\n/setwallet عنوان — محفظة TON لاستلام الدفع", "\n/setwallet address — TON wallet to receive payments"),
 
@@ -326,8 +319,8 @@ _S = [
     ("bad_int", "⚠️ اكتب رقماً صحيحاً.", "⚠️ Enter a valid whole number."),
     ("ask_desc", "📝 اكتب <b>وصف المنتج</b> (أو /skip للتخطي):", "📝 Type the <b>product description</b> (or /skip):"),
     ("ask_media",
-     "📷 أرسل <b>صور و/أو فيديوهات المنتج</b> (حتى {n} في المجموع، كصور/فيديو وليس كملفات).\nعند الانتهاء اكتب /done — أو /skip إذا لا تريد وسائط.",
-     "📷 Send the <b>product photos and/or videos</b> (up to {n} in total, as photos/videos, not files).\nWhen finished send /done — or /skip for no media."),
+     "📷 أرسل <b>صور و/أو فيديوهات المنتج</b> (حتى {n} في المجموع، كصور/فيديو وليس كملفات).\nعند الانتهاء اكتب /done — أو /skip إذا لا تريد وسائط.\n(ملاحظة: الوسائط تظهر في البوت فقط، وليس في الموقع)",
+     "📷 Send the <b>product photos and/or videos</b> (up to {n} in total, as photos/videos, not files).\nWhen finished send /done — or /skip for no media.\n(Note: media shows in the bot only, not on the website)"),
     ("media_max", "⚠️ الحد الأقصى {n} صور. اكتب /done للمتابعة.", "⚠️ Maximum {n} media items. Send /done to continue."),
     ("what_video", "الفيديو", "video"),
     ("what_photo", "الصورة", "photo"),
@@ -403,8 +396,8 @@ _S = [
     ("b_mlib", "📚 مكتبة الوسائط", "📚 Media library"),
     ("b_lib", "📚 إضافة من المكتبة", "📚 Add from library"),
     ("lm_title",
-     "🖼 <b>وسائط قائمة المنتجات</b>\nتظهر هذه الصور/الفيديوهات فوق قائمة «كل المنتجات».\n\n📷 الحالية: {n}",
-     "🖼 <b>Product list media</b>\nThese photos/videos appear above the “All products” list.\n\n📷 Current: {n}"),
+     "🖼 <b>وسائط قائمة المنتجات</b>\nتظهر هذه الصور/الفيديوهات فوق قائمة «كل المنتجات» في البوت.\n\n📷 الحالية: {n}",
+     "🖼 <b>Product list media</b>\nThese photos/videos appear above the “All products” list in the bot.\n\n📷 Current: {n}"),
     ("b_lm_up", "📤 رفع جديد", "📤 Upload new"),
     ("b_lm_lib", "📚 من المكتبة", "📚 From library"),
     ("b_lm_clear", "🧹 مسح الوسائط", "🧹 Clear media"),
@@ -497,18 +490,19 @@ _S = [
 
 STR = {"ar": {k: a for k, a, _ in _S}, "en": {k: e for k, _, e in _S}}
 
-# كلمات «دفعت» من كل اللغات تُجمع في تعبير واحد (يفهمها البوت مهما كانت لغة المتجر)
 PAID_RE = re.compile("(" + "|".join(STR[l]["paid_words"] for l in LANGS) + ")", re.I)
 
-# اللغة الحالية للتحديث الجاري
 _lang = ContextVar("lang", default=DEFAULT_LANG)
 
 
 def T(key, lang=None, **kw):
-    """نص مترجم حسب لغة المتجر الحالية (أو لغة محددة)."""
+    """نص مترجم حسب لغة المتجر الحالية (أو لغة محددة). لا يرمي خطأً أبداً."""
     lang = lang or _lang.get()
-    s = STR.get(lang, STR["ar"]).get(key) or STR["ar"][key]
-    return s.format(**kw)
+    s = STR.get(lang, STR["ar"]).get(key) or STR["ar"].get(key) or key
+    try:
+        return s.format(**kw)
+    except Exception:
+        return s
 
 
 def wilaya_names(lang=None):
@@ -523,9 +517,8 @@ def status_label(status, lang=None):
 # ═════════════════════════════════════════════════════════════════════════════
 # 3) سياق المتجر (متعدد البوتات)
 # ═════════════════════════════════════════════════════════════════════════════
-# المتجر الحالي: id=0 هو البوت الرئيسي، وغيره id = bot_id للبوت الفرعي
 _shop = ContextVar("shop", default={"id": 0, "admin": ADMIN_ID, "username": None})
-RUNNING = {}  # bot_id -> Application (البوتات الفرعية فقط)
+RUNNING = {}
 
 
 def shop_id():
@@ -543,6 +536,7 @@ USE_PG = False
 pool = None
 sqlite_conn = None
 sqlite_lock = threading.RLock()
+PG_MAX_CONN = 40
 
 
 class Cur:
@@ -564,16 +558,47 @@ class Cur:
         return [dict(r) for r in self.cur.fetchall()]
 
 
+def _pg_get_conn():
+    """يأخذ اتصالاً سليماً من الـ pool: ينتظر إن امتلأ، ويستبدل الاتصالات الميتة."""
+    deadline = time.time() + 20
+    last = None
+    while True:
+        try:
+            conn = pool.getconn()
+        except PoolError as e:                     # الـ pool ممتلئ: انتظر قليلاً بدل الفشل
+            last = e
+            if time.time() > deadline:
+                raise
+            time.sleep(0.05)
+            continue
+        if conn.closed:
+            try:
+                pool.putconn(conn, close=True)
+            except Exception:
+                pass
+            if time.time() > deadline:
+                raise last or RuntimeError("no healthy connection")
+            continue
+        return conn
+
+
 @contextmanager
 def cursor():
     if USE_PG:
-        conn = pool.getconn()
+        conn = _pg_get_conn()
+        broken = False
         try:
             with conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as c:
                     yield Cur(c, True)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            broken = True
+            raise
         finally:
-            pool.putconn(conn, close=bool(conn.closed))
+            try:
+                pool.putconn(conn, close=bool(conn.closed) or broken)
+            except Exception:
+                pass
     else:
         with sqlite_lock:
             with sqlite_conn:
@@ -585,16 +610,19 @@ def cursor():
 
 
 def ensure_column(table, col, typ):
-    if USE_PG:
-        with cursor() as cur:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
-    else:
-        with cursor() as cur:
-            cur.execute(f"PRAGMA table_info({table})")
-            cols = [r["name"] for r in cur.fetchall()]
-        if col not in cols:
+    try:
+        if USE_PG:
             with cursor() as cur:
-                cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
+        else:
+            with cursor() as cur:
+                cur.execute(f"PRAGMA table_info({table})")
+                cols = [r["name"] for r in cur.fetchall()]
+            if col not in cols:
+                with cursor() as cur:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    except Exception as e:
+        log.warning("ensure_column %s.%s failed: %s", table, col, str(e)[:120])
 
 
 def init_db():
@@ -603,7 +631,7 @@ def init_db():
     for u in [x for x in urls if x]:
         try:
             pool = ThreadedConnectionPool(
-                2, 12, u, connect_timeout=8,
+                2, PG_MAX_CONN, u, connect_timeout=8,
                 keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
             )
             USE_PG = True
@@ -678,7 +706,6 @@ def init_db():
                 created_at BIGINT
             )
         """)
-        # مكتبة حقول الزبون: تُعرَّف مرة واحدة وتُربط بأي منتج
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS shop_fields (
                 id {pk},
@@ -697,7 +724,6 @@ def init_db():
                 field_id INT NOT NULL
             )
         """)
-        # أرقام هواتف الزبائن المتحقَّق منها (يستعملها الموقع)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS shop_users (
                 shop_id BIGINT NOT NULL,
@@ -706,7 +732,6 @@ def init_db():
                 PRIMARY KEY (shop_id, user_id)
             )
         """)
-        # مكتبة الوسائط: كل وسيلة تُرفع مرة واحدة وتُستعمل في أي منتج أو في قائمة المنتجات
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS shop_media (
                 id {pk},
@@ -717,7 +742,6 @@ def init_db():
                 created_at BIGINT
             )
         """)
-        # (جدول قديم من الإصدار السابق، يُستعمل فقط للترحيل)
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS shop_extras (
                 id {pk},
@@ -730,15 +754,12 @@ def init_db():
             )
         """)
 
-    # ترحيل الأعمدة (للقواعد القديمة)
     ensure_column("shop_orders", "product_id", "INT")
     ensure_column("shop_orders", "product_name", "TEXT")
     ensure_column("shop_orders", "reserved_until", "BIGINT")
     ensure_column("shop_photos", "kind", "TEXT DEFAULT 'photo'")
-    # الصفوف القديمة تأخذ 0 = البوت الرئيسي
     ensure_column("shop_products", "shop_id", "BIGINT DEFAULT 0")
     ensure_column("shop_orders", "shop_id", "BIGINT DEFAULT 0")
-    # أعمدة الحقل المخصص القديم (تبقى للتوافق مع الطلبات والمنتجات القديمة)
     ensure_column("shop_products", "extra_label", "TEXT")
     ensure_column("shop_products", "extra_type", "TEXT")
     ensure_column("shop_orders", "extra_label", "TEXT")
@@ -746,29 +767,28 @@ def init_db():
     ensure_column("shop_products", "extra_len", "INT DEFAULT 0")
     ensure_column("shop_products", "extra_prefix", "TEXT")
     ensure_column("shop_products", "extra_suffix", "TEXT")
-    # الحقول المتعددة: قيم الزبون كـ JSON داخل الطلب
     ensure_column("shop_orders", "extras_json", "TEXT")
-    # الدفع بعملة TON
     ensure_column("shop_products", "price_ton", "DOUBLE PRECISION")
     ensure_column("shop_orders", "ton_nano", "BIGINT")
-    # تفعيل الدفع بالنجوم لكل منتج (1 = مفعّل، 0 = معطّل)
     ensure_column("shop_products", "stars_on", "INT DEFAULT 1")
 
     if USE_PG:
-        with cursor() as cur:
-            for tbl, col in (("shop_orders", "created_at"), ("shop_orders", "paid_at")):
-                cur.execute(
-                    "SELECT data_type FROM information_schema.columns WHERE table_name=? AND column_name=?",
-                    (tbl, col),
-                )
-                r = cur.fetchone()
-                if r and str(r["data_type"]).startswith("timestamp"):
-                    cur.execute(f"ALTER TABLE {tbl} ALTER COLUMN {col} DROP DEFAULT")
+        try:
+            with cursor() as cur:
+                for tbl, col in (("shop_orders", "created_at"), ("shop_orders", "paid_at")):
                     cur.execute(
-                        f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
+                        "SELECT data_type FROM information_schema.columns WHERE table_name=? AND column_name=?",
+                        (tbl, col),
                     )
+                    r = cur.fetchone()
+                    if r and str(r["data_type"]).startswith("timestamp"):
+                        cur.execute(f"ALTER TABLE {tbl} ALTER COLUMN {col} DROP DEFAULT")
+                        cur.execute(
+                            f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT USING EXTRACT(EPOCH FROM {col})::BIGINT"
+                        )
+        except Exception as e:
+            log.warning("timestamp migration failed: %s", str(e)[:150])
 
-    # فهارس لتسريع الاستعلامات (آمنة: IF NOT EXISTS)
     for ddl in (
         "CREATE INDEX IF NOT EXISTS ix_prod_shop ON shop_products (shop_id, active)",
         "CREATE INDEX IF NOT EXISTS ix_photo_prod ON shop_photos (product_id)",
@@ -791,7 +811,7 @@ def init_db():
 
 
 def migrate_legacy_extras():
-    """ينقل الحقول القديمة إلى المكتبة الجديدة مرة واحدة (ويدمج الحقول المتطابقة في حقل واحد)."""
+    """ينقل الحقول القديمة إلى المكتبة الجديدة مرة واحدة."""
     try:
         if _load_setting("extras_v2"):
             return
@@ -858,9 +878,9 @@ def get_shop_lang(sid):
         v = _load_setting(f"lang_{sid}")
         if v in LANGS:
             lang = v
+        _SHOP_LANG[sid] = lang
     except Exception as e:
         log.warning("get_shop_lang failed: %s", e)
-    _SHOP_LANG[sid] = lang
     return lang
 
 
@@ -869,12 +889,12 @@ def set_shop_lang(sid, lang):
     _SHOP_LANG[sid] = lang
 
 
-# ── الإعدادات: محفظة TON (لكل متجر محفظته) — مع كاش قصير لتخفيف الاستعلامات ──
-_WALLET_CACHE = {}   # sid -> (expires, value)
+# ── محفظة TON ──
+_WALLET_CACHE = {}
 
 
 def get_wallet():
-    """محفظة المتجر الحالي، وإلا محفظة البوت الرئيسي (تُستعمل لكل البوتات الفرعية)."""
+    """محفظة المتجر الحالي، وإلا محفظة البوت الرئيسي."""
     sid = shop_id()
     hit = _WALLET_CACHE.get(sid)
     now = time.time()
@@ -899,7 +919,7 @@ def set_wallet(w):
     _WALLET_CACHE.clear()
 
 
-# ── المنتجات (كلها مقيّدة بالمتجر الحالي) ──
+# ── المنتجات ──
 PRODUCT_FIELDS = {"name", "description", "price", "stock", "shipping", "delivery_text", "delivery_file", "active",
                   "price_ton", "stars_on"}
 
@@ -951,7 +971,6 @@ def delete_product(pid):
 
 
 def get_media(pid):
-    """صور وفيديوهات المنتج: [{'file_id':..., 'kind':'photo'|'video'}]"""
     with cursor() as cur:
         cur.execute("SELECT file_id, kind FROM shop_photos WHERE product_id=? ORDER BY id", (pid,))
         return [{"file_id": r["file_id"], "kind": r["kind"] or "photo"} for r in cur.fetchall()]
@@ -973,7 +992,7 @@ def clear_photos(pid):
         cur.execute("DELETE FROM shop_photos WHERE product_id=?", (pid,))
 
 
-# ── حقول الزبون: مكتبة محفوظة تُربط بأي منتج ──
+# ── حقول الزبون ──
 def _insert_field(cur, sid, label, kind, flen, prefix, suffix):
     cur.execute("""
         INSERT INTO shop_fields (shop_id, label, kind, flen, prefix, suffix)
@@ -983,7 +1002,6 @@ def _insert_field(cur, sid, label, kind, flen, prefix, suffix):
 
 
 def list_extras(pid):
-    """الحقول المربوطة بالمنتج بالترتيب."""
     with cursor() as cur:
         cur.execute("""
             SELECT f.* FROM shop_fields f
@@ -994,7 +1012,6 @@ def list_extras(pid):
 
 
 def list_library():
-    """كل الحقول المحفوظة في هذا المتجر."""
     with cursor() as cur:
         cur.execute("SELECT * FROM shop_fields WHERE shop_id=? ORDER BY id", (shop_id(),))
         return cur.fetchall()
@@ -1067,9 +1084,8 @@ def get_phone(uid):
     return r["phone"] if r and r["phone"] else None
 
 
-# ── مكتبة الوسائط ──
+# ── مكتبة الوسائط (للبوت فقط) ──
 def lib_add(file_id, unique_id, kind="photo"):
-    """يحفظ وسيلة في مكتبة المتجر (بدون تكرار). يرجع رقمها."""
     with cursor() as cur:
         if unique_id:
             cur.execute("SELECT id FROM shop_media WHERE shop_id=? AND unique_id=?", (shop_id(), unique_id))
@@ -1107,7 +1123,6 @@ def lib_delete(mid):
         cur.execute("DELETE FROM shop_media WHERE id=? AND shop_id=?", (mid, shop_id()))
 
 
-# ── وسائط قائمة «كل المنتجات» ──
 def get_list_media():
     try:
         v = _load_setting(f"list_media_{shop_id()}")
@@ -1121,7 +1136,7 @@ def set_list_media(items):
     _save_setting(f"list_media_{shop_id()}", json.dumps(items))
 
 
-# ── المخزون والحجز (الحجز = طلبات pending لم تنتهِ مهلتها) ──
+# ── المخزون والحجز ──
 def _held_by_others(cur, pid, uid):
     cur.execute("""
         SELECT COUNT(*) AS n FROM shop_orders
@@ -1137,7 +1152,6 @@ def _lock_product(cur, pid):
 
 
 def availability(pid, uid):
-    """available / held (محجوز لزبون آخر) / sold. المخزون -1 = غير محدود."""
     p = get_product(pid)
     if not p or not p["active"] or p["stock"] == 0:
         return "sold"
@@ -1150,8 +1164,6 @@ def availability(pid, uid):
 
 # ── الطلبات ──
 def place_order(user, pid, phone, wilaya, address, extras=None):
-    """ينشئ الطلب ويحجز القطعة. extras = قائمة [{'label':..,'value':..}].
-    returns (order_id, 'ok') أو (None, 'sold'/'held')"""
     with cursor() as cur:
         p = _lock_product(cur, pid)
         if not p or not p["active"] or p["stock"] == 0:
@@ -1175,7 +1187,6 @@ def place_order(user, pid, phone, wilaya, address, extras=None):
 
 
 def hold_for_payment(order_id, user_id):
-    """pre_checkout: يتأكد أن الطلب صالح ويمدّد الحجز. يرجع الطلب أو None."""
     with cursor() as cur:
         cur.execute("SELECT * FROM shop_orders WHERE id=? AND shop_id=?", (order_id, shop_id()))
         o = cur.fetchone()
@@ -1268,12 +1279,13 @@ def stock_label(stock):
 
 
 def fmt_ton(v):
-    """يعرض مبلغ TON بدون أصفار زائدة."""
-    return f"{float(v):.9f}".rstrip("0").rstrip(".")
+    try:
+        return f"{float(v):.9f}".rstrip("0").rstrip(".") or "0"
+    except (TypeError, ValueError):
+        return "0"
 
 
 def parse_ton_price(text):
-    """يحوّل نص إلى سعر TON صالح أو None."""
     try:
         v = float(text.strip().translate(AR_DIGITS).replace(",", ".").replace(" ", ""))
     except ValueError:
@@ -1290,7 +1302,6 @@ def ton_on(p):
 
 
 def pay_methods(p):
-    """طرق الدفع المتاحة فعلياً لهذا المنتج: 'stars' و/أو 'ton'."""
     m = []
     if stars_on(p) and (p.get("price") or 0) > 0:
         m.append("stars")
@@ -1310,7 +1321,6 @@ def price_label(p):
 
 
 def extra_rules(f):
-    """قواعد حقل واحد (طول/بداية/نهاية) كقائمة أسطر جاهزة للعرض (HTML)."""
     r = []
     n = f.get("flen") or 0
     if n:
@@ -1327,7 +1337,6 @@ def kind_label(f):
 
 
 def check_extra(f, text):
-    """يتحقق من إجابة الزبون لحقل واحد. يرجع (القيمة، None) أو (None، نص الخطأ)."""
     t = (text or "").strip()
     if f.get("kind") == "number":
         t = t.translate(AR_DIGITS).replace(" ", "")
@@ -1348,7 +1357,6 @@ def check_extra(f, text):
 
 
 def order_extras(o):
-    """قيم حقول الطلب كقائمة [{'label','value'}] (تدعم الطلبات القديمة ذات الحقل الواحد)."""
     items = []
     if o.get("extras_json"):
         try:
@@ -1407,10 +1415,9 @@ def is_admin(update):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 6) واجهة الزبون: العرض
+# 6) واجهة الزبون: العرض (داخل البوت)
 # ═════════════════════════════════════════════════════════════════════════════
 async def send_with_media(message, text, markup, media):
-    """يرسل الوسائط (صورة/فيديو/ألبوم) ثم النص والأزرار."""
     try:
         if len(media) == 1:
             m = media[0]
@@ -1530,7 +1537,7 @@ async def lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = q.data.split("_")[1]
     if lang not in LANGS:
         return
-    set_shop_lang(shop_id(), lang)   # تسري على كل زبائن هذا المتجر
+    set_shop_lang(shop_id(), lang)
     _lang.set(lang)
     await setup_commands(context.bot, shop_admin(), shop_id())
     try:
@@ -1568,7 +1575,6 @@ async def send_summary(message, context):
 
 
 async def ask_extra_or_summary(message, context, p):
-    """يسأل الزبون عن حقل الزبون التالي (بالترتيب) وإلا يعرض الملخص."""
     extras = list_extras(p["id"])
     done = context.user_data.setdefault("xvals", [])
     i = len(done)
@@ -1624,7 +1630,7 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pid"] = pid
     context.user_data["xvals"] = []
 
-    if not p["shipping"]:  # منتج رقمي: لا هاتف ولا ولاية ولا عنوان
+    if not p["shipping"]:
         return await ask_extra_or_summary(q.message, context, p)
 
     kb = ReplyKeyboardMarkup(
@@ -1660,7 +1666,6 @@ async def got_wilaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     idx = int(q.data.split("_")[1])
-    # نخزّن الاسمين (عربي / English) ليقرأها الأدمن بأي لغة
     context.user_data["wilaya"] = f"{idx:02d} - {WILAYAS['ar'][idx - 1]} / {WILAYAS['en'][idx - 1]}"
     await q.message.edit_text(T("wilaya_chosen", w=esc(wilaya_names()[idx - 1])))
     return ADDRESS
@@ -1733,7 +1738,6 @@ async def _pay(update: Update, context: ContextTypes.DEFAULT_TYPE, method):
         await q.message.reply_text(T("session_expired"))
         return ConversationHandler.END
 
-    # كل حقول الزبون يجب أن تكون مملوءة
     extras = list_extras(pid)
     xvals = d.get("xvals", [])
     if len(xvals) != len(extras):
@@ -1806,7 +1810,6 @@ async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def notify_admin(context, build):
-    """build: دالة تأخذ لغة الأدمن وتُرجع النص (فتصل الرسالة بلغة الأدمن لا الزبون)."""
     a = shop_admin()
     if a:
         try:
@@ -1817,7 +1820,6 @@ async def notify_admin(context, build):
 
 
 async def deliver_digital(context, chat_id, p):
-    """يرسل المحتوى الرقمي للزبون. يرجع True إذا أُرسل شيء."""
     sent = False
     if p.get("delivery_text"):
         await context.bot.send_message(chat_id, T("your_product", text=esc(p["delivery_text"])))
@@ -1829,7 +1831,6 @@ async def deliver_digital(context, chat_id, p):
 
 
 async def finalize_paid(context, uid, oid, status, order, charge, stars=True):
-    """منطق ما بعد الدفع المشترك بين النجوم و TON."""
     if status == "ok":
         p = get_product(order["product_id"]) if order.get("product_id") else None
         if p and not p["shipping"]:
@@ -1849,7 +1850,6 @@ async def finalize_paid(context, uid, oid, status, order, charge, stars=True):
     if status == "dup":
         return
 
-    # soldout / invalid
     if stars:
         try:
             await context.bot.refund_star_payment(user_id=uid, telegram_payment_charge_id=charge)
@@ -1865,7 +1865,6 @@ async def finalize_paid(context, uid, oid, status, order, charge, stars=True):
                 lambda L: T("adm_manual_refund", L, uid=uid, charge=esc(charge), err=esc(e)),
             )
     else:
-        # TON: لا استرجاع تلقائي، يلزم تدخل الأدمن
         try:
             await context.bot.send_message(uid, T("ton_manual_user"))
         except Exception as e:
@@ -1890,7 +1889,6 @@ _TON_HTTP = None
 
 
 def ton_http():
-    """عميل HTTP مشترك (اتصال مُعاد استعماله بدل فتح اتصال جديد في كل فحص)."""
     global _TON_HTTP
     if _TON_HTTP is None or _TON_HTTP.is_closed:
         _TON_HTTP = httpx.AsyncClient(timeout=15)
@@ -1898,7 +1896,6 @@ def ton_http():
 
 
 async def find_ton_payment(wallet, oid, min_nano, since):
-    """يبحث في آخر معاملات المحفظة عن تحويل بنفس التعليق وبمبلغ كافٍ. يرجع الهاش أو None."""
     if not wallet or not min_nano:
         return None
     params = {"address": wallet, "limit": 50}
@@ -1916,7 +1913,7 @@ async def find_ton_payment(wallet, oid, min_nano, since):
     memo = ton_memo(oid)
     for tx in data.get("result", []):
         m = tx.get("in_msg") or {}
-        if not m.get("source"):           # تجاهل المعاملات غير الواردة
+        if not m.get("source"):
             continue
         if int(tx.get("utime") or 0) < int(since or 0) - 60:
             continue
@@ -1939,9 +1936,8 @@ async def settle_ton(context, o, tx_hash):
 
 
 async def watch_ton(context, oid):
-    """يراقب المحفظة حتى 10 دقائق ثم يتوقف (يبقى زر «تحقق» متاحاً)."""
     try:
-        wallet = get_wallet()
+        wallet = await asyncio.to_thread(get_wallet)
         for _ in range(60):
             await asyncio.sleep(10)
             o = await asyncio.to_thread(get_order, oid)
@@ -1979,7 +1975,6 @@ async def ton_check_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def user_says_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الزبون كتب «دفعت» ← نتحقق من آخر طلب TON معلّق له."""
     with cursor() as cur:
         cur.execute(
             "SELECT * FROM shop_orders WHERE shop_id=? AND user_id=? AND status='pending' "
@@ -2083,7 +2078,7 @@ def panel_markup(p):
         [B(T("b_lib"), callback_data=f"mpick_p{i}_0")],
         [B(T("b_to_dig") if p["shipping"] else T("b_to_phys"), callback_data=f"adm_ship_{i}")],
     ]
-    if p.get("price_ton") and stars_on(p):   # الاثنان مفعّلان ← يمكن حذف أحدهما
+    if p.get("price_ton") and stars_on(p):
         rows.append([B(T("b_off_stars"), callback_data=f"adm_offstars_{i}"),
                      B(T("b_off_ton"), callback_data=f"adm_offton_{i}")])
     if not p["shipping"]:
@@ -2128,12 +2123,11 @@ async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def adm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أزرار الأدمن خارج المحادثات (فتح اللوحة، تبديل، حذف...)."""
     q = update.callback_query
     await q.answer()
     if not is_admin(update):
         return
-    parts = q.data.split("_")  # adm_<action>_<pid>
+    parts = q.data.split("_")
     action, pid = parts[1], int(parts[2])
     p = get_product(pid)
     if not p:
@@ -2146,9 +2140,9 @@ async def adm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new = 0 if p["shipping"] else 1
         stock = p["stock"]
         if new == 0 and stock == 0:
-            stock = -1          # رقمي: غير محدود
+            stock = -1
         if new == 1 and stock < 0:
-            stock = 1           # مادي: ضع كمية
+            stock = 1
         update_product(pid, shipping=new, stock=stock)
         await render_panel(q.message, pid, edit=True)
     elif action == "active":
@@ -2379,7 +2373,7 @@ async def deliv_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await finish_admin(update, context)
 
 
-# ── تعديل منتج (دخول من الأزرار) ──
+# ── تعديل منتج ──
 async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -2426,7 +2420,7 @@ async def got_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_product(pid, price=int(t), stars_on=1)
     elif field == "ton":
         if t == "-":
-            if not stars_on(p):          # لا يمكن حذف الطريقة الوحيدة
+            if not stars_on(p):
                 await update.message.reply_text(T("need_one"))
                 return E_VALUE
             update_product(pid, price_ton=None)
@@ -2497,7 +2491,6 @@ def field_text(f):
 
 
 async def x_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أزرار الحقول خارج المحادثة: القائمة، المكتبة، ربط/فصل/حذف حقل."""
     q = update.callback_query
     await q.answer()
     if not is_admin(update):
@@ -2515,7 +2508,7 @@ async def x_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     B = InlineKeyboardButton
 
-    if action == "xpick":                    # شاشة اختيار حقل محفوظ
+    if action == "xpick":
         used = {f["id"] for f in list_extras(pid)}
         lib = [f for f in list_library() if f["id"] not in used]
         rows = [[B(f"{'🔢' if f.get('kind') == 'number' else '🔤'} {f['label'][:40]}",
@@ -2529,7 +2522,7 @@ async def x_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     fid = nums[1]
-    if action == "xat":                      # ربط حقل محفوظ بالمنتج
+    if action == "xat":
         if len(list_extras(pid)) >= MAX_EXTRAS:
             await q.message.reply_text(T("x_max", n=MAX_EXTRAS))
             return
@@ -2541,7 +2534,7 @@ async def x_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not f:
         await q.message.reply_text(T("not_found"))
         return
-    if action == "xf":                       # لوحة حقل
+    if action == "xf":
         kb = InlineKeyboardMarkup([
             [B(T("b_x_edit"), callback_data=f"xedit_{pid}_{fid}")],
             [B(T("b_x_unlink"), callback_data=f"xun_{pid}_{fid}")],
@@ -2558,7 +2551,6 @@ async def x_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def x_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء محادثة إنشاء حقل جديد (xnew_<pid>) أو تعديل حقل محفوظ (xedit_<pid>_<fid>)."""
     q = update.callback_query
     if not is_admin(update):
         await q.answer()
@@ -2618,7 +2610,6 @@ async def got_x_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _x_norm(a, t):
-    """يوحّد القيمة: للحقل الرقمي يحوّل الأرقام العربية ويحذف الفراغات."""
     if a.get("xtype") == "number":
         return t.translate(AR_DIGITS).replace(" ", "")
     return t
@@ -2716,8 +2707,6 @@ async def show_lm_panel(message, edit=False):
 
 
 async def send_library_page(message, target, page):
-    """يعرض صفحة من المكتبة: معاينة الوسائط (مرقّمة) + أزرار الاختيار.
-    target: 'x' إدارة/حذف، 'l' قائمة المنتجات، 'p<ID>' منتج."""
     manage = target == "x"
     total = lib_count()
     items = lib_list(LIB_PAGE, page * LIB_PAGE)
@@ -2783,13 +2772,13 @@ async def media_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "lm_clear":
         set_list_media([])
         await show_lm_panel(q.message, edit=True)
-    elif parts[0] == "mpick":                       # mpick_<target>_<page>
+    elif parts[0] == "mpick":
         await send_library_page(q.message, parts[1], int(parts[2]))
-    elif parts[0] == "mdel":                        # mdel_<id>_<page>
+    elif parts[0] == "mdel":
         lib_delete(int(parts[1]))
         toast = T("lib_deleted")
         await send_library_page(q.message, "x", int(parts[2]))
-    elif parts[0] == "madd":                        # madd_<target>_<id>
+    elif parts[0] == "madd":
         target, mid = parts[1], int(parts[2])
         m = lib_get(mid)
         if not m:
@@ -2821,7 +2810,6 @@ async def media_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """رفع وسائط جديدة: mup_l لقائمة المنتجات (+المكتبة)، mup_x للمكتبة فقط."""
     q = update.callback_query
     await q.answer()
     if not is_admin(update):
@@ -2872,7 +2860,7 @@ async def lmedia_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def adm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     a = context.user_data.pop("adm", {})
     if a.get("mode") == "new" and a.get("pid"):
-        delete_product(a["pid"])  # مسودة غير مكتملة
+        delete_product(a["pid"])
     await update.message.reply_text(T("adm_cancelled"))
     return ConversationHandler.END
 
@@ -2921,7 +2909,6 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T("refund_bad"))
         return
     if str(o["charge_id"]).startswith("ton_"):
-        # دفع TON: الاسترجاع يدوي من محفظتك، لا يمكن عبر Telegram Stars
         await update.message.reply_text(T("refund_bad"))
         return
     try:
@@ -2952,11 +2939,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 11) إدارة البوتات المتعددة (البوت الرئيسي فقط)
 # ═════════════════════════════════════════════════════════════════════════════
 async def got_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الأدمن يرسل توكن بوت جديد ← يُتحقق منه ويُحفظ ويُشغَّل."""
     if shop_id() != 0 or not is_admin(update):
         return
     token = update.message.text.strip()
-    # احذف رسالة التوكن من المحادثة للأمان
     try:
         await update.message.delete()
     except Exception:
@@ -2974,7 +2959,6 @@ async def got_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     owner = update.effective_user.id
-    # إن كان يعمل مسبقاً أعد تشغيله بالتوكن الجديد
     if me.id in RUNNING:
         await stop_shop(me.id)
     with cursor() as cur:
@@ -3068,11 +3052,10 @@ async def load_shops():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 12) الموقع: Telegram Mini App (متجر داخل تيليجرام + دفع بالنجوم أو TON من داخله)
+# 12) الموقع: Telegram Mini App — منتجات فقط، بدون صور ولا فيديو
 # ═════════════════════════════════════════════════════════════════════════════
-MAIN_APP = None       # Application الخاصة بالبوت الرئيسي
+MAIN_APP = None
 WEB_RUNNER = None
-_DL_LOCKS = {}        # قفل لكل ملف وسائط (بدل قفل عام يُبطئ التحميل المتوازي)
 TG_JS = {"data": None, "ts": 0.0, "fail": 0.0}
 TG_JS_URL = "https://telegram.org/js/telegram-web-app.js"
 
@@ -3089,7 +3072,6 @@ def webapp_keyboard():
 
 
 def shop_app(sid):
-    """Application الخاصة بالمتجر (الرئيسي أو فرعي) أو None."""
     return MAIN_APP if sid == 0 else RUNNING.get(sid)
 
 
@@ -3098,7 +3080,6 @@ def plain(s):
 
 
 def verify_init_data(init_data, token, max_age=86400):
-    """يتحقق من initData القادمة من تيليجرام (توقيع HMAC) ويرجع بيانات المستخدم أو None."""
     try:
         pairs = dict(parse_qsl(init_data, keep_blank_values=True))
         got = pairs.pop("hash", "")
@@ -3119,108 +3100,88 @@ def verify_init_data(init_data, token, max_age=86400):
 
 
 class _Ctx:
-    """بديل خفيف لـ context يكفي لدوال الدفع (finalize_paid / watch_ton)."""
     def __init__(self, bot):
         self.bot = bot
 
 
 def ton_comment_payload(text):
-    """يبني payload (BOC بصيغة base64) لتحويل TON مع تعليق نصي — خلية واحدة بلا مراجع."""
     data = b"\x00\x00\x00\x00" + text.encode()
     cell = bytes([0, len(data) * 2]) + data
     boc = bytes([0xB5, 0xEE, 0x9C, 0x72, 0x01, 0x01, 0x01, 0x01, 0x00, len(cell), 0x00]) + cell
     return base64.b64encode(boc).decode()
 
 
-def media_url(sid, file_id):
-    return f"/media/{sid}/{quote(file_id, safe='')}"
+def _safe_dumps(o):
+    return json.dumps(o, default=str, ensure_ascii=False)
 
 
-# كاش مسموح الوسائط لكل متجر (بدل 3 استعلامات لكل صورة)
-_MEDIA_OK = {}   # sid -> (expires, set)
-
-
-def _build_media_set():
-    s = set()
-    with cursor() as cur:
-        cur.execute("SELECT ph.file_id FROM shop_photos ph JOIN shop_products p ON p.id=ph.product_id "
-                    "WHERE p.shop_id=?", (shop_id(),))
-        s.update(r["file_id"] for r in cur.fetchall())
-        cur.execute("SELECT file_id FROM shop_media WHERE shop_id=?", (shop_id(),))
-        s.update(r["file_id"] for r in cur.fetchall())
-    s.update(m.get("file_id") for m in get_list_media() if m.get("file_id"))
-    return s
-
-
-def media_allowed(file_id):
-    """لا نخدم إلا ملفات تخص المتجر الحالي (منتجات / مكتبة / قائمة المنتجات)."""
-    sid, now = shop_id(), time.time()
-    hit = _MEDIA_OK.get(sid)
-    if hit and hit[0] > now and file_id in hit[1]:
-        return True
-    # غير موجود في الكاش (أو انتهى): أعد البناء مرة واحدة ثم احكم
-    s = _build_media_set()
-    _MEDIA_OK[sid] = (now + 60, s)
-    return file_id in s
+def jresp(data, status=200):
+    return web.json_response(data, status=status, dumps=_safe_dumps)
 
 
 def load_home_data(uid, sid):
-    """يبني قائمة المنتجات بعدد ثابت من الاستعلامات (بدل استعلامات متعددة لكل منتج)."""
+    """يبني قائمة المنتجات (نصوص وأسعار فقط). كل جزء محمي بحيث لا يسقط الموقع أبداً."""
     prods = list_products()
-    has_wallet = bool(get_wallet())
-    media, extras, held = {}, {}, {}
-    with cursor() as cur:
-        cur.execute("SELECT ph.product_id, ph.file_id, ph.kind FROM shop_photos ph "
-                    "JOIN shop_products p ON p.id=ph.product_id WHERE p.shop_id=? ORDER BY ph.id", (sid,))
-        for r in cur.fetchall():
-            media.setdefault(r["product_id"], []).append(r)
-        cur.execute("SELECT l.product_id, f.id, f.label, f.kind, f.flen, f.prefix, f.suffix "
-                    "FROM shop_product_fields l JOIN shop_fields f ON f.id=l.field_id "
-                    "WHERE f.shop_id=? ORDER BY l.id", (sid,))
-        for r in cur.fetchall():
-            extras.setdefault(r["product_id"], []).append(r)
-        cur.execute("SELECT product_id, COUNT(*) AS n FROM shop_orders WHERE shop_id=? AND status='pending' "
-                    "AND reserved_until > ? AND user_id <> ? GROUP BY product_id", (sid, int(time.time()), uid))
-        for r in cur.fetchall():
-            held[r["product_id"]] = r["n"]
-    # حدّث كاش الوسائط المسموحة مجاناً من نفس البيانات
     try:
-        ids = {m["file_id"] for lst in media.values() for m in lst}
-        ids.update(m.get("file_id") for m in get_list_media() if m.get("file_id"))
-        old = _MEDIA_OK.get(sid)
-        _MEDIA_OK[sid] = (time.time() + 60, ids | (old[1] if old else set()))
-    except Exception:
-        pass
+        has_wallet = bool(get_wallet())
+    except Exception as e:
+        log.warning("wallet check failed: %s", e)
+        has_wallet = False
+
+    extras, held = {}, {}
+    try:
+        with cursor() as cur:
+            cur.execute("SELECT l.product_id, f.id, f.label, f.kind, f.flen, f.prefix, f.suffix "
+                        "FROM shop_product_fields l JOIN shop_fields f ON f.id=l.field_id "
+                        "WHERE f.shop_id=? ORDER BY l.id", (sid,))
+            for r in cur.fetchall():
+                extras.setdefault(r["product_id"], []).append(r)
+    except Exception as e:
+        log.warning("home extras query failed: %s", e)
+    try:
+        with cursor() as cur:
+            cur.execute("SELECT product_id, COUNT(*) AS n FROM shop_orders WHERE shop_id=? AND status='pending' "
+                        "AND reserved_until > ? AND user_id <> ? GROUP BY product_id", (sid, int(time.time()), uid))
+            for r in cur.fetchall():
+                held[r["product_id"]] = r["n"]
+    except Exception as e:
+        log.warning("home held query failed: %s", e)
+
     out = []
     for p in prods:
-        methods = []
-        if stars_on(p) and (p.get("price") or 0) > 0:
-            methods.append("stars")
-        if p.get("price_ton") and has_wallet:
-            methods.append("ton")
-        if p["stock"] == 0:
-            state = "sold"
-        elif p["stock"] < 0 or p["stock"] - held.get(p["id"], 0) > 0:
-            state = "available"
-        else:
-            state = "held"
-        out.append({
-            "id": p["id"], "name": p["name"], "description": p["description"] or "",
-            "shipping": bool(p["shipping"]), "stock": p["stock"], "methods": methods,
-            "price": p["price"] if "stars" in methods else None,
-            "price_ton": fmt_ton(p["price_ton"]) if "ton" in methods else None,
-            "state": state,
-            "media": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"] or "photo"}
-                      for m in media.get(p["id"], [])[:MAX_PHOTOS]],
-            "extras": [{"id": f["id"], "label": f["label"], "kind": f.get("kind") or "text",
-                        "rules": [plain(r) for r in extra_rules(f)]} for f in extras.get(p["id"], [])],
-        })
+        try:
+            methods = []
+            if stars_on(p) and (p.get("price") or 0) > 0:
+                methods.append("stars")
+            if p.get("price_ton") and has_wallet:
+                methods.append("ton")
+            stock = p.get("stock")
+            stock = 0 if stock is None else stock
+            if stock == 0:
+                state = "sold"
+            elif stock < 0 or stock - held.get(p["id"], 0) > 0:
+                state = "available"
+            else:
+                state = "held"
+            out.append({
+                "id": p["id"], "name": p.get("name") or "", "description": p.get("description") or "",
+                "shipping": bool(p.get("shipping")), "stock": stock, "methods": methods,
+                "price": p.get("price") if "stars" in methods else None,
+                "price_ton": fmt_ton(p["price_ton"]) if "ton" in methods else None,
+                "state": state,
+                "extras": [{"id": f["id"], "label": f["label"], "kind": f.get("kind") or "text",
+                            "rules": [plain(r) for r in extra_rules(f)]} for f in extras.get(p["id"], [])],
+            })
+        except Exception as e:
+            log.warning("skip product %s in home: %s", p.get("id"), e)
     return out
 
 
 async def web_auth(request):
-    """يتحقق من المستخدم ويضبط سياق المتجر/اللغة لهذا الطلب (دون حجب حلقة الأحداث)."""
-    sid = int(request.match_info["sid"])
+    try:
+        sid = int(request.match_info["sid"])
+    except Exception:
+        raise web.HTTPNotFound()
     app = shop_app(sid)
     if not app:
         raise web.HTTPNotFound()
@@ -3237,19 +3198,21 @@ async def web_auth(request):
 
 
 def _err(code, msg, **extra):
-    return web.json_response({"ok": False, "code": code, "error": plain(msg), **extra})
+    return jresp({"ok": False, "code": code, "error": plain(msg), **extra})
 
 
 @web.middleware
 async def err_mw(request, handler):
-    """يسجّل أي خطأ غير متوقع في اللوغ ويرجع JSON بدل صفحة بيضاء."""
+    """أي خطأ غير متوقع يُسجَّل ويرجع JSON منظم بدل صفحة 500 بيضاء."""
     try:
         return await handler(request)
     except web.HTTPException:
         raise
+    except asyncio.CancelledError:
+        raise
     except Exception:
         log.exception("WEB ERROR on %s", request.path)
-        return web.json_response({"ok": False, "error": "server"}, status=500)
+        return jresp({"ok": False, "code": "server", "error": "server"}, status=200)
 
 
 async def web_health(request):
@@ -3261,7 +3224,11 @@ _PAGE_GZ = None
 
 async def web_page(request):
     global _PAGE_GZ
-    if not shop_app(int(request.match_info["sid"])):
+    try:
+        sid = int(request.match_info["sid"])
+    except Exception:
+        raise web.HTTPNotFound()
+    if not shop_app(sid):
         raise web.HTTPNotFound()
     if "gzip" in request.headers.get("Accept-Encoding", ""):
         if _PAGE_GZ is None:
@@ -3274,11 +3241,10 @@ async def web_page(request):
 
 
 async def fetch_tg_js():
-    """ينزّل سكربت تيليجرام مرة ويخزّنه (بعض الشبكات تبطئ telegram.org فيتعلّق التحميل)."""
     now = time.time()
     if TG_JS["data"] and now - TG_JS["ts"] < 6 * 3600:
         return TG_JS["data"]
-    if now - TG_JS["fail"] < 120:          # فشل حديث: لا نعيد المحاولة في كل طلب
+    if now - TG_JS["fail"] < 120:
         return TG_JS["data"]
     try:
         async with httpx.AsyncClient(timeout=4, follow_redirects=True) as c:
@@ -3306,29 +3272,44 @@ async def web_home(request):
     sid = shop["id"]
 
     def build():
+        try:
+            title = app.bot.first_name or "Shop"
+        except Exception:
+            title = "Shop"
+        try:
+            uname = app.bot.username or ""
+        except Exception:
+            uname = shop.get("username") or ""
+        try:
+            phone = get_phone(user.id)
+        except Exception as e:
+            log.warning("get_phone failed: %s", e)
+            phone = None
         return {
+            "ok": True,
             "lang": _lang.get(),
-            "title": app.bot.first_name or "Shop",
-            "bot": app.bot.username,
-            "banner": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"]} for m in get_list_media()[:MAX_PHOTOS]],
+            "title": title,
+            "bot": uname,
             "products": load_home_data(user.id, sid),
-            "phone": get_phone(user.id),
+            "phone": phone,
             "wilayas": wilaya_names(),
         }
 
-    data = await asyncio.to_thread(build)      # لا نحجب حلقة الأحداث أثناء استعلامات قاعدة البيانات
-    resp = web.json_response(data)
-    resp.enable_compression()
-    return resp
+    data = await asyncio.to_thread(build)
+    return jresp(data)
 
 
 async def web_phone(request):
     app, shop, user = await web_auth(request)
-    return web.json_response({"phone": await asyncio.to_thread(get_phone, user.id)})
+    try:
+        phone = await asyncio.to_thread(get_phone, user.id)
+    except Exception as e:
+        log.warning("phone failed: %s", e)
+        phone = None
+    return jresp({"phone": phone})
 
 
 def _create_order_sync(user, data):
-    """كل عمليات قاعدة البيانات لإنشاء الطلب. ترجع ((code,msg,extra), None) أو (None, نتيجة)."""
     try:
         pid = int(data.get("pid") or 0)
     except Exception:
@@ -3393,6 +3374,8 @@ async def web_order(request):
     app, shop, user = await web_auth(request)
     try:
         data = await request.json()
+        if not isinstance(data, dict):
+            raise ValueError("bad body")
     except Exception:
         return _err("bad_request", T("session_expired"))
     err, res = await asyncio.to_thread(_create_order_sync, user, data)
@@ -3412,13 +3395,13 @@ async def web_order(request):
             log.error("create_invoice_link failed: %s", e)
             await asyncio.to_thread(set_order, oid, "cancelled")
             return _err("invoice", T("session_expired"))
-        return web.json_response({"ok": True, "oid": oid, "method": "stars", "invoice": link})
+        return jresp({"ok": True, "oid": oid, "method": "stars", "invoice": link})
 
     memo = ton_memo(oid)
     task = asyncio.create_task(watch_ton(_Ctx(app.bot), oid))
     TON_TASKS.add(task)
     task.add_done_callback(TON_TASKS.discard)
-    return web.json_response({"ok": True, "oid": oid, "method": "ton", "ton": {
+    return jresp({"ok": True, "oid": oid, "method": "ton", "ton": {
         "address": wallet, "nano": str(nano), "amount": fmt_ton(nano / 1e9), "memo": memo,
         "payload": ton_comment_payload(memo),
         "url": f"https://app.tonkeeper.com/transfer/{wallet}?amount={nano}&text={memo}",
@@ -3430,11 +3413,10 @@ async def web_status(request):
     o = await asyncio.to_thread(get_order, int(request.match_info["oid"]))
     if not o or o["user_id"] != user.id:
         raise web.HTTPNotFound()
-    return web.json_response({"status": o["status"], "oid": o["id"]})
+    return jresp({"status": o["status"], "oid": o["id"]})
 
 
 async def web_check(request):
-    """زر «تحقق من الدفع» لطلبات TON."""
     app, shop, user = await web_auth(request)
     oid = int(request.match_info["oid"])
     o = await asyncio.to_thread(get_order, oid)
@@ -3446,67 +3428,7 @@ async def web_check(request):
         if h:
             await settle_ton(_Ctx(app.bot), o, h)
             o = await asyncio.to_thread(get_order, oid)
-    return web.json_response({"status": o["status"], "oid": oid})
-
-
-def _make_thumb(src, dst, w):
-    with Image.open(src) as im:
-        im = im.convert("RGB")
-        im.thumbnail((w, w))
-        im.save(dst, "JPEG", quality=78, optimize=True)
-
-
-async def web_media(request):
-    """يخدم صور/فيديوهات المنتجات من تيليجرام (file_id) مع تخزين مؤقت على القرص."""
-    sid = int(request.match_info["sid"])
-    fid = unquote(request.match_info["fid"])
-    app = shop_app(sid)
-    if not app:
-        raise web.HTTPNotFound()
-    _shop.set(app.bot_data["shop"])
-    if not await asyncio.to_thread(media_allowed, fid):
-        raise web.HTTPNotFound()
-    base = os.path.join(MEDIA_DIR, hashlib.sha1(f"{sid}:{fid}".encode()).hexdigest())
-
-    def cached():
-        return [x for x in glob.glob(base + ".*") if not x.endswith(".part") and "_w" not in os.path.basename(x)]
-
-    found = await asyncio.to_thread(cached)
-    if not found:
-        lock = _DL_LOCKS.setdefault(base, asyncio.Lock())
-        try:
-            async with lock:
-                found = await asyncio.to_thread(cached)
-                if not found:
-                    try:
-                        f = await app.bot.get_file(fid)
-                        ext = os.path.splitext(f.file_path or "")[1] or ".bin"
-                        await f.download_to_drive(custom_path=base + ".part")
-                        os.replace(base + ".part", base + ext)
-                        found = [base + ext]
-                    except Exception as e:
-                        log.warning("media proxy failed: %s", e)
-                        raise web.HTTPNotFound()
-        finally:
-            _DL_LOCKS.pop(base, None)
-    path = found[0]
-    try:
-        w = int(request.query.get("w", 0))
-    except ValueError:
-        w = 0
-    if Image and w and os.path.splitext(path)[1].lower() in (".jpg", ".jpeg", ".png", ".webp"):
-        w = max(160, min(w, 1280))
-        dst = f"{base}_w{w}.jpg"
-        if not os.path.exists(dst):
-            tmp = f"{dst}.{time.time_ns()}.tmp"
-            try:
-                await asyncio.to_thread(_make_thumb, path, tmp, w)
-                os.replace(tmp, dst)
-            except Exception as e:
-                log.warning("thumb failed: %s", e)
-                dst = path
-        path = dst
-    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=604800, immutable"})
+    return jresp({"status": o["status"], "oid": oid})
 
 
 async def web_manifest(request):
@@ -3533,7 +3455,6 @@ def web_app_factory():
         web.post(r"/api/{sid:\d+}/order", web_order),
         web.get(r"/api/{sid:\d+}/order/{oid:\d+}", web_status),
         web.post(r"/api/{sid:\d+}/order/{oid:\d+}/check", web_check),
-        web.get(r"/media/{sid:\d+}/{fid}", web_media),
         web.get("/tonconnect-manifest.json", web_manifest),
         web.get("/logo.png", web_logo),
     ])
@@ -3550,7 +3471,6 @@ async def start_web():
         WEBAPP_URL = ""
         return
     try:
-        os.makedirs(MEDIA_DIR, exist_ok=True)
         runner = web.AppRunner(web_app_factory())
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", PORT).start()
@@ -3558,7 +3478,7 @@ async def start_web():
         log.info("Mini App listening on 0.0.0.0:%s (public URL: %s)", PORT, WEBAPP_URL)
         if not os.path.exists(LOGO_PATH):
             log.warning("Logo not found at %s (TON Connect icon). Put shop_logo.png next to bot.py", LOGO_PATH)
-        asyncio.create_task(fetch_tg_js())     # تسخين كاش سكربت تيليجرام
+        asyncio.create_task(fetch_tg_js())
     except Exception as e:
         log.error("Mini App failed to start (%s) -> falling back to the classic bot flow", e)
         WEBAPP_URL = ""
@@ -3575,7 +3495,6 @@ async def stop_web():
 
 
 async def self_check():
-    """يطلب الرابط العام من الخارج ليتأكد أن الدومين/المنفذ يصلان فعلاً إلى هذا السيرفر."""
     if not WEBAPP_URL:
         return "🚫 WEBAPP_URL / RAILWAY_PUBLIC_DOMAIN غير مضبوط"
     try:
@@ -3589,11 +3508,15 @@ async def self_check():
 
 
 async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """فحص سريع لسبب «فشل التحميل» للموقع."""
     if not is_admin(update):
         return
     chk = await self_check()
     tg_ok = "✅" if await fetch_tg_js() else "⚠️ (سيُستعمل telegram.org مباشرة)"
+    try:
+        n = len(await asyncio.to_thread(list_products))
+        db = f"✅ ({n} منتج ظاهر)"
+    except Exception as e:
+        db = f"❌ {str(e)[:100]}"
     t = (
         "🩺 <b>Mini App</b>\n\n"
         f"URL: <code>{esc(webapp_url(shop_id()) if WEBAPP_URL else '—')}</code>\n"
@@ -3601,12 +3524,11 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"الفحص الخارجي: {esc(chk)}\n"
         f"سكربت تيليجرام (tg.js): {tg_ok}\n"
         f"الخادم يعمل: {'✅' if WEB_RUNNER else '❌'}\n"
-        f"قاعدة البيانات: {'PostgreSQL' if USE_PG else 'SQLite'}"
+        f"قاعدة البيانات: {'PostgreSQL' if USE_PG else 'SQLite'} — {esc(db)}"
     )
     await update.message.reply_text(t)
 
 
-# ── مشاركة رقم الهاتف خارج محادثة الطلب (يستعملها الموقع عبر requestContact) ──
 async def global_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = update.message.contact
     if not c or c.user_id != update.effective_user.id:
@@ -3642,21 +3564,15 @@ body{background:var(--bg);color:var(--tx);font:15px/1.55 system-ui,-apple-system
 h1{font-size:22px;margin:4px 0 12px}
 h2{font-size:19px;margin:6px 0 10px}
 .hint{color:var(--hint);font-size:13px}
-.scroller{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -14px 14px;padding:0 14px;scrollbar-width:none}
-.scroller::-webkit-scrollbar{display:none}
-.slide{flex:0 0 100%;scroll-snap-align:center;border-radius:18px;overflow:hidden;background:var(--card);aspect-ratio:16/10}
-.slide img,.slide video{width:100%;height:100%;object-fit:cover;display:block}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.card{background:var(--card);border-radius:18px;overflow:hidden;cursor:pointer;position:relative;display:flex;flex-direction:column}
+.list{display:flex;flex-direction:column;gap:10px}
+.card{background:var(--card);border-radius:16px;padding:14px;cursor:pointer;position:relative;display:flex;align-items:center;gap:12px}
 .card:active{transform:scale(.98)}
-.thumb{aspect-ratio:1/1;background:rgba(127,127,127,.12);display:flex;align-items:center;justify-content:center;font-size:44px;position:relative;overflow:hidden}
-.thumb img,.thumb video{width:100%;height:100%;object-fit:cover}
-.play{position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,.55);color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px}
-.info{padding:10px 12px 12px}
-.name{font-weight:600;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ico{font-size:28px;flex:0 0 auto}
+.info{flex:1;min-width:0}
+.name{font-weight:600;margin-bottom:6px;overflow:hidden;text-overflow:ellipsis}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{background:var(--bg);border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
-.badge{position:absolute;top:8px;inset-inline-start:8px;z-index:2;background:#e5484d;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px}
+.badge{background:#e5484d;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px;flex:0 0 auto}
 button{font:inherit;border:0;border-radius:14px;padding:14px 16px;width:100%;cursor:pointer;margin-top:10px;font-weight:600}
 button.primary{background:var(--btn);color:var(--btx)}
 button.secondary{background:var(--card);color:var(--tx)}
@@ -3669,7 +3585,7 @@ input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--c
 .kv{background:var(--card);border-radius:12px;padding:10px 12px;margin-top:6px;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:13px;direction:ltr;text-align:left}
 .center{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:70vh;padding:20px}
 .big{font-size:56px}
-.sk{background:linear-gradient(90deg,var(--card) 25%,rgba(127,127,127,.18) 50%,var(--card) 75%);background-size:200% 100%;animation:sh 1.2s infinite;border-radius:18px;aspect-ratio:1/1.25}
+.sk{background:linear-gradient(90deg,var(--card) 25%,rgba(127,127,127,.18) 50%,var(--card) 75%);background-size:200% 100%;animation:sh 1.2s infinite;border-radius:16px;height:76px;margin-bottom:10px}
 @keyframes sh{to{background-position:-200% 0}}
 .search{margin:0 0 12px}
 .spin{width:36px;height:36px;border:4px solid var(--line);border-top-color:var(--btn);border-radius:50%;animation:s 1s linear infinite;margin-bottom:12px}
@@ -3679,7 +3595,7 @@ input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--c
 </style>
 </head>
 <body>
-<div id="app"><div class="wrap"><div class="sk" style="aspect-ratio:16/8;margin-bottom:12px"></div><div class="grid"><div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div></div>
+<div id="app"><div class="wrap"><div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div>
 <div id="toast"></div>
 <script>
 let tg = window.Telegram && window.Telegram.WebApp;
@@ -3700,7 +3616,7 @@ const I18N = {
     paid_title:'تم الدفع بنجاح!', paid_msg:'وصلتك تفاصيل الطلب (والمنتج الرقمي إن وُجد) في محادثة البوت.',
     wait_title:'جارٍ تأكيد الدفع…', wait_msg:'لحظات من فضلك.', failed:'لم تكتمل العملية.',
     back_shop:'العودة للمتجر', net_err:'تعذّر الاتصال، حاول مجدداً.', cancelled:'تم إلغاء الدفع.',
-    open_tg:'افتح المتجر من داخل تيليجرام.', order:'رقم الطلب', ship_dz:'🇩🇿 البيع والتوصيل داخل الجزائر فقط'
+    open_tg:'افتح المتجر من داخل تيليجرام.', order:'رقم الطلب', ship_dz:'🇩🇿 البيع والتوصيل داخل الجزائر فقط', retry:'إعادة المحاولة'
   },
   en: {
     empty:'No products available right now.', digital:'💾 Digital product — delivered right after payment', stock:'In stock',
@@ -3715,14 +3631,13 @@ const I18N = {
     paid_title:'Payment successful!', paid_msg:'Your order details (and the digital product, if any) were sent to the bot chat.',
     wait_title:'Confirming payment…', wait_msg:'Just a moment.', failed:'The operation was not completed.',
     back_shop:'Back to shop', net_err:'Connection failed, please try again.', cancelled:'Payment cancelled.',
-    open_tg:'Open the shop from inside Telegram.', order:'Order number', ship_dz:'🇩🇿 Sales and delivery inside Algeria only'
+    open_tg:'Open the shop from inside Telegram.', order:'Order number', ship_dz:'🇩🇿 Sales and delivery inside Algeria only', retry:'Retry'
   }
 };
 let L = 'ar', S = null, tcUI = null, stack = ['home'];
 const st = {p:null, form:null, oid:null, ton:null, timer:null};
 const t = k => (I18N[L] && I18N[L][k]) || I18N.ar[k] || k;
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function api(path, opts) {
@@ -3740,6 +3655,14 @@ async function api(path, opts) {
     throw new Error(e.name === 'AbortError' ? 'timeout' : e.message);
   } finally { clearTimeout(to); }
 }
+async function apiRetry(path, opts, n) {
+  let last;
+  for (let i = 0; i < (n || 3); i++) {
+    try { return await api(path, opts); }
+    catch (e) { last = e; await sleep(600 * (i + 1)); }
+  }
+  throw last;
+}
 function toast(m) {
   const el = document.getElementById('toast');
   el.textContent = m; el.classList.add('on');
@@ -3753,7 +3676,8 @@ function back() { if (stack.length > 1) { stack.pop(); render(); } }
 function render() {
   clearInterval(st.timer);
   const v = stack[stack.length - 1];
-  views[v]();
+  try { views[v](); }
+  catch (e) { app.innerHTML = '<div class="center"><p>' + t('net_err') + '</p><button class="primary" onclick="location.reload()">' + t('retry') + '</button></div>'; }
   try {
     if (stack.length > 1 && ['wait','done','failed'].indexOf(v) < 0) tg.BackButton.show(); else tg.BackButton.hide();
   } catch (e) {}
@@ -3761,50 +3685,38 @@ function render() {
 }
 async function reload() { try { await load(); } catch (e) {} stack = ['home']; render(); }
 
-/* ── عناصر مشتركة ── */
-function media(m, attrs, w) {
-  return m.kind === 'video'
-    ? '<video src="' + m.url + '" ' + (attrs || 'controls') + ' playsinline preload="none" style="background:#000"></video>'
-    : '<img src="' + m.url + (w ? '?w=' + w : '') + '" loading="lazy" decoding="async" alt="">';
-}
 function chips(p) {
   let h = '';
-  if (p.price != null) h += '<span class="chip">⭐ ' + p.price + '</span>';
-  if (p.price_ton != null) h += '<span class="chip">💎 ' + p.price_ton + ' TON</span>';
+  if (p.price != null) h += '<span class="chip">⭐ ' + esc(p.price) + '</span>';
+  if (p.price_ton != null) h += '<span class="chip">💎 ' + esc(p.price_ton) + ' TON</span>';
   return '<div class="chips">' + h + '</div>';
 }
 
-/* ── الصفحات ── */
+/* ── الصفحات (منتجات فقط، بلا صور/فيديو) ── */
 function vHome() {
-  const ban = S.banner.length
-    ? '<div class="scroller">' + S.banner.map(m => '<div class="slide">' + media(m, '', 900) + '</div>').join('') + '</div>' : '';
   const cards = S.products.map(p => {
-    const m = p.media.find(x => x.kind !== 'video');
-    const th = m ? media(m, '', 420) + (p.media[0].kind === 'video' ? '<span class="play">▶</span>' : '')
-      : (p.media.length ? '🎬' : (p.shipping ? '🛍' : '💾'));
     const bad = p.state !== 'available' ? '<span class="badge">' + t('sold') + '</span>' : '';
-    return '<div class="card" data-n="' + esc(p.name.toLowerCase()) + '" onclick="openProduct(' + p.id + ')">' + bad + '<div class="thumb">' + th + '</div>' +
-      '<div class="info"><div class="name">' + esc(p.name) + '</div>' + chips(p) + '</div></div>';
+    return '<div class="card" data-n="' + esc(p.name.toLowerCase()) + '" onclick="openProduct(' + p.id + ')">' +
+      '<div class="ico">' + (p.shipping ? '🛍' : '💾') + '</div>' +
+      '<div class="info"><div class="name">' + esc(p.name) + '</div>' + chips(p) + '</div>' + bad + '</div>';
   }).join('');
   const sb = S.products.length >= 6 ? '<input class="search" type="search" placeholder="🔍" oninput="filt(this.value)">' : '';
-  app.innerHTML = '<div class="wrap"><h1>' + esc(S.title) + '</h1>' + ban + sb +
-    (cards ? '<div class="grid" id="grid">' + cards + '</div>' : '<p class="hint">' + t('empty') + '</p>') + '</div>';
+  app.innerHTML = '<div class="wrap"><h1>' + esc(S.title) + '</h1>' + sb +
+    (cards ? '<div class="list" id="grid">' + cards + '</div>' : '<p class="hint">' + t('empty') + '</p>') + '</div>';
 }
 
 function filt(q) {
   q = q.trim().toLowerCase();
   document.querySelectorAll('#grid .card').forEach(c => { c.style.display = !q || c.dataset.n.indexOf(q) >= 0 ? '' : 'none'; });
 }
-function openProduct(id) { st.p = S.products.find(x => x.id === id); show('product'); }
+function openProduct(id) { st.p = S.products.find(x => x.id === id); if (st.p) show('product'); }
 
 function vProduct() {
   const p = st.p;
-  const gal = p.media.length
-    ? '<div class="scroller">' + p.media.map(m => '<div class="slide" style="aspect-ratio:1/1">' + media(m, '', 900) + '</div>').join('') + '</div>' : '';
   const ok = p.state === 'available' && p.methods.length;
   const note = p.state === 'sold' ? t('sold') : (p.state === 'held' ? t('held') : t('unavailable'));
   const line = p.shipping ? ((p.stock >= 0 ? t('stock') + ': ' + p.stock + ' · ' : '') + t('ship_dz')) : t('digital');
-  app.innerHTML = '<div class="wrap">' + gal + '<h2>' + esc(p.name) + '</h2>' + chips(p) +
+  app.innerHTML = '<div class="wrap"><h2>' + esc(p.name) + '</h2>' + chips(p) +
     (p.description ? '<div class="desc">' + esc(p.description) + '</div>' : '') +
     '<p class="hint">' + line + '</p>' +
     (ok ? '<button class="primary" onclick="toCheckout()">' + t('buy') + '</button>' : '<p class="err">' + note + '</p>') + '</div>';
@@ -3833,7 +3745,7 @@ async function pollPhone(n) {
 
 function vCheckout() {
   const p = st.p, f = st.form;
-  if (p.methods.indexOf('ton') >= 0) loadTC();   // تحميل مسبق صامت لمكتبة TON Connect
+  if (p.methods.indexOf('ton') >= 0) loadTC();
   let h = '<div class="wrap"><h2>' + esc(p.name) + '</h2>' + chips(p);
   if (p.shipping) {
     h += '<div id="phoneBox" style="margin-top:12px">' + phoneHtml() + '</div>';
@@ -3852,13 +3764,13 @@ function vCheckout() {
   h += '<div id="err" class="err"></div><div id="payBtns">';
   p.methods.forEach(m => {
     h += '<button class="primary" onclick="pay(\'' + m + '\')">' +
-      (m === 'stars' ? '⭐ ' + t('pay_stars') + ' (' + p.price + ')' : '💎 ' + t('pay_ton') + ' (' + p.price_ton + ' TON)') + '</button>';
+      (m === 'stars' ? '⭐ ' + t('pay_stars') + ' (' + esc(p.price) + ')' : '💎 ' + t('pay_ton') + ' (' + esc(p.price_ton) + ' TON)') + '</button>';
   });
   app.innerHTML = h + '</div></div>';
 }
 
 function lock(on) { document.querySelectorAll('#payBtns button').forEach(b => b.disabled = on); }
-function errText(r) { return r.code === 'phone' ? t('need_phone') : (r.error || t('net_err')); }
+function errText(r) { return r.code === 'phone' ? t('need_phone') : (r.code === 'server' ? t('net_err') : (r.error || t('net_err'))); }
 
 async function pay(method) {
   const p = st.p, f = st.form, err = document.getElementById('err');
@@ -3924,16 +3836,18 @@ function loadTC() {
   });
 }
 async function setupTC() {
-  if (!(await loadTC())) return;
-  if (!tcUI) {
-    tcUI = new TON_CONNECT_UI.TonConnectUI({
-      manifestUrl: location.origin + '/tonconnect-manifest.json',
-      actionsConfiguration: {twaReturnUrl: 'https://t.me/' + S.bot}
-    });
-    tcUI.onStatusChange(() => tonLabel());
-  }
-  tcUI.connectionRestored.then(tonLabel);
-  tonLabel();
+  try {
+    if (!(await loadTC())) return;
+    if (!tcUI) {
+      tcUI = new TON_CONNECT_UI.TonConnectUI({
+        manifestUrl: location.origin + '/tonconnect-manifest.json',
+        actionsConfiguration: {twaReturnUrl: 'https://t.me/' + S.bot}
+      });
+      tcUI.onStatusChange(() => tonLabel());
+    }
+    tcUI.connectionRestored.then(tonLabel);
+    tonLabel();
+  } catch (e) { tcUI = null; }
 }
 function tonLabel() {
   const b = document.getElementById('tonBtn');
@@ -3963,7 +3877,7 @@ function vWait() {
 }
 function vDone() {
   app.innerHTML = '<div class="center"><div class="big">✅</div><h2>' + t('paid_title') + '</h2><p class="hint">' + t('order') +
-    ' #' + st.oid + '<br>' + t('paid_msg') + '</p><button class="primary" onclick="reload()">' + t('back_shop') + '</button></div>';
+    ' #' + esc(st.oid) + '<br>' + t('paid_msg') + '</p><button class="primary" onclick="reload()">' + t('back_shop') + '</button></div>';
 }
 function vFailed() {
   app.innerHTML = '<div class="center"><div class="big">❌</div><h2>' + t('failed') + '</h2>' +
@@ -3972,13 +3886,13 @@ function vFailed() {
 const views = {home: vHome, product: vProduct, checkout: vCheckout, ton: vTon, wait: vWait, done: vDone, failed: vFailed};
 
 async function load() {
-  try { S = await api('/home'); }
-  catch (e) { S = await api('/home'); }          // إعادة محاولة واحدة تلقائياً
+  const r = await apiRetry('/home', null, 3);
+  if (!r || r.ok === false || !Array.isArray(r.products)) throw new Error('server');
+  S = r;
   applyLang();
-  try { localStorage.setItem('home_' + SID, JSON.stringify(S)); } catch (e) {}
 }
 function applyLang() {
-  L = S.lang;
+  L = S.lang || 'ar';
   document.documentElement.lang = L;
   document.documentElement.dir = L === 'ar' ? 'rtl' : 'ltr';
 }
@@ -3989,20 +3903,15 @@ function applyLang() {
     app.innerHTML = '<div class="center"><p>' + I18N.ar.open_tg + '<br>' + I18N.en.open_tg + '</p></div>';
     return;
   }
-  tg.ready(); tg.expand();
+  try { tg.ready(); tg.expand(); } catch (e) {}
   try { if (tg.BackButton) tg.BackButton.onClick(back); } catch (e) {}
-  let cached = null;
-  try { cached = JSON.parse(localStorage.getItem('home_' + SID) || 'null'); } catch (e) {}
-  if (cached && cached.products) { S = cached; applyLang(); render(); }
-  const slow = setTimeout(() => { if (!S) toast('⏳ ' + t('wait_msg')); }, 6000);
   try {
     await load();
-    if (stack.length === 1 && stack[0] === 'home') render();
+    render();
   } catch (e) {
-    if (!S) app.innerHTML = '<div class="center"><p>' + t('net_err') + '<br><small dir="ltr">' + esc(e.message) +
-      '</small></p><button class="primary" onclick="location.reload()">↻</button></div>';
+    app.innerHTML = '<div class="center"><p>' + t('net_err') + '<br><small dir="ltr">' + esc(e.message) +
+      '</small></p><button class="primary" onclick="location.reload()">' + t('retry') + '</button></div>';
   }
-  clearTimeout(slow);
 })();
 </script>
 </body>
@@ -4050,7 +3959,7 @@ async def setup_commands(bot, admin_id, sid):
         lang = get_shop_lang(sid)
         cmds = user_commands(lang)
         await bot.set_my_commands(cmds, scope=BotCommandScopeDefault())
-        for lg in LANGS:  # نفس اللغة للجميع مهما كانت لغة هاتفهم
+        for lg in LANGS:
             await bot.set_my_commands(cmds, scope=BotCommandScopeDefault(), language_code=lg)
     except Exception as e:
         log.warning("default set_my_commands failed: %s", e)
@@ -4064,7 +3973,6 @@ async def setup_commands(bot, admin_id, sid):
 
 
 async def bind_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعمل أولاً مع كل تحديث: يحدد المتجر ولغة المستخدم."""
     shop = context.application.bot_data["shop"]
     _shop.set(shop)
     _lang.set(get_shop_lang(shop["id"]))
@@ -4115,7 +4023,6 @@ async def post_shutdown(app: Application):
 def register_handlers(app: Application, is_main: bool):
     text_only = filters.TEXT & ~filters.COMMAND
 
-    # يحدد المتجر واللغة قبل أي handler آخر (group -1)
     app.add_handler(TypeHandler(Update, bind_shop), group=-1)
 
     admin_conv = ConversationHandler(
@@ -4198,18 +4105,15 @@ def register_handlers(app: Application, is_main: bool):
     app.add_handler(MessageHandler(filters.CONTACT, global_contact))
     app.add_handler(CommandHandler("phone", cmd_phone))
 
-    # الزبون
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(list_cb, pattern=r"^list$"))
 
-    # الدفع
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
     app.add_handler(CallbackQueryHandler(ton_check_cb, pattern=r"^tonchk_\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(PAID_RE), user_says_paid))
 
-    # الأدمن
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^setlang_(ar|en)$"))
@@ -4227,7 +4131,6 @@ def register_handlers(app: Application, is_main: bool):
     if is_main:
         app.add_handler(CommandHandler("bots", cmd_bots))
         app.add_handler(CommandHandler("delbot", cmd_delbot))
-        # أي رسالة نصية على شكل توكن بوت (تُعالَج فقط إن لم تكن داخل محادثة نشطة)
         app.add_handler(MessageHandler(filters.TEXT & filters.Regex(TOKEN_RE), got_token))
 
     app.add_error_handler(on_error)
