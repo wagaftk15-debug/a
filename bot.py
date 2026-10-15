@@ -3565,6 +3565,8 @@ WEB_HTML = r"""<!doctype html>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0}
 body{background:var(--bg);color:var(--tx);font:15px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Arabic",Tahoma,sans-serif;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+body.hasnav{padding-bottom:calc(88px + env(safe-area-inset-bottom))}
+body.wd{--bg:#1a1b1d;--tx:#fff;--hint:#8b9096;--card:#25282b;--line:rgba(255,255,255,.1);--btn:#ffa85c;--btx:#1e1307}
 .wrap{padding:16px 16px 28px;max-width:560px;margin:0 auto}
 .wrap.has-bar{padding-bottom:110px}
 h1{font-size:26px;line-height:1.25;margin:2px 0 4px;font-weight:800}
@@ -3616,13 +3618,77 @@ input:focus,select:focus,textarea:focus{border-color:var(--btn)}
 .search{margin:0 0 14px;border-radius:999px;padding:12px 16px}
 .spin{width:38px;height:38px;border:4px solid var(--line);border-top-color:var(--btn);border-radius:50%;animation:s 1s linear infinite;margin-bottom:14px}
 @keyframes s{to{transform:rotate(360deg)}}
-#toast{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom));transform:translateX(-50%);background:rgba(20,20,20,.92);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90%;text-align:center;z-index:10}
+#toast{position:fixed;left:50%;bottom:calc(100px + env(safe-area-inset-bottom));transform:translateX(-50%);background:rgba(20,20,20,.92);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90%;text-align:center;z-index:30}
 #toast.on{opacity:1}
+
+/* ── شريط التنقل السفلي ── */
+.nav{position:fixed;inset:auto 0 0 0;z-index:6;display:none;gap:8px;justify-content:center;background:var(--bg);border-top:1px solid var(--line);padding:6px 12px calc(6px + env(safe-area-inset-bottom))}
+.nav button{margin:0;width:auto;flex:1;max-width:240px;background:none;color:var(--hint);padding:8px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:12px;font-weight:700;border-radius:14px}
+.nav button.on{color:var(--btn)}
+.nav svg{width:25px;height:25px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* ── المحفظة ── */
+.w{max-width:560px;margin:0 auto;padding:16px 14px 20px;direction:ltr;color:#fff}
+.w h2{color:#fff;margin:6px 4px 14px}
+.wbox{background:#232629;border:1px solid rgba(255,255,255,.07);border-radius:28px;overflow:hidden}
+.wcard{position:relative;padding:22px 20px 18px;color:#fff;border-radius:28px;
+  background:radial-gradient(120% 75% at 72% 42%,rgba(86,104,222,.95) 0%,rgba(86,104,222,0) 68%),
+  linear-gradient(180deg,#1a2057 0%,#2b3690 38%,#1b2161 72%,#10143f 100%);box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.wtop{display:flex;justify-content:space-between;align-items:center}
+.wtop svg{display:block}
+.wout{width:56px;height:56px;padding:0;margin:0;border-radius:16px;border:1.5px solid rgba(255,255,255,.22);background:rgba(18,24,78,.65);display:grid;place-items:center;color:#fff}
+.wbal{display:flex;align-items:center;gap:12px;margin-top:22px;flex-wrap:wrap}
+.wbal b{font-size:48px;font-weight:800;line-height:1}
+.wchg{font-weight:600;font-size:17px;font-family:ui-monospace,Menlo,monospace;color:#7ee0b5}
+.wchg.dn{color:#ff8f8f}
+.waddr{font-family:ui-monospace,Menlo,monospace;letter-spacing:.12em;font-size:22px;font-weight:600;margin-top:16px;display:flex;align-items:center;gap:14px;cursor:pointer}
+.wown{display:flex;align-items:center;gap:12px;margin-top:22px}
+.wav{width:52px;height:52px;border-radius:12px;background:linear-gradient(135deg,#97e676,#3fb857);border:2px solid rgba(255,255,255,.35);display:grid;place-items:center;font-weight:800;color:#fff;font-size:22px;flex:0 0 auto}
+.wown small{display:block;font-size:12px;opacity:.75;direction:rtl;text-align:left;line-height:1.2}
+.wown .u{font-size:22px;font-weight:700;line-height:1.25;word-break:break-all}
+.wact{margin-inline-start:auto;background:rgba(40,120,125,.55);border:1px solid rgba(120,220,200,.4);color:#d5fff5;border-radius:12px;padding:5px 13px;font-size:14px;direction:rtl;flex:0 0 auto;align-self:flex-end}
+.wrow{display:flex;align-items:center;gap:16px;padding:18px 20px;border-bottom:1px solid rgba(255,255,255,.07)}
+.wrow:last-child{border-bottom:0}
+.wic{flex:0 0 auto;display:block}
+.wn{font-size:21px;font-weight:700;color:#fff;line-height:1.3}
+.wn i{font-style:normal;font-size:13px;color:#8b9096;font-family:ui-monospace,Menlo,monospace;letter-spacing:.1em;margin-inline-start:12px}
+.wp{color:#8b9096;font-family:ui-monospace,Menlo,monospace;font-size:17px}
+.up{color:#2fb67c}.dn{color:#e5484d}
+.wr{margin-inline-start:auto;text-align:right}
+.wr b{display:block;font-size:24px;font-weight:800;color:#fff;line-height:1.3}
+.wr span{color:#8b9096;font-family:ui-monospace,Menlo,monospace;font-size:16px}
+.wbtns{padding:16px 14px 14px;display:grid;grid-template-columns:1fr 1fr;gap:14px;background:#232629}
+.wbtns button{margin:0;display:flex;align-items:center;justify-content:center;gap:12px;padding:20px 10px;border-radius:20px;font-size:19px;direction:rtl}
+.wbtns svg{width:26px;height:26px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.wdep{background:#ffa85c;color:#1e1307}
+.wwd{background:#3b342f;color:#fff;border:1.5px solid #b98348}
+.whis{grid-column:1/3;background:transparent;color:#fff;border:1.5px solid rgba(255,255,255,.12)}
+.wcon{text-align:center;padding:34px 10px 10px}
+.wcon h2{color:#fff;margin:14px 0 6px;font-size:24px}
+.wcon p{margin:0 0 16px;opacity:.8;direction:rtl}
+.wcon button{background:#ffa85c;color:#1e1307;margin-top:6px;direction:rtl}
+.hrow{display:flex;align-items:center;gap:14px;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,.07)}
+.hrow:last-child{border-bottom:0}
+.hic{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;font-size:20px;font-weight:800;flex:0 0 auto}
+.hic.in{background:rgba(47,182,124,.18);color:#2fb67c}
+.hic.out{background:rgba(229,72,77,.16);color:#ff7a7f}
+.hmid{min-width:0}
+.hmid b{display:block;font-size:16px;color:#fff;direction:rtl;text-align:left}
+.hmid span{display:block;color:#8b9096;font-size:12px;font-family:ui-monospace,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hamt{margin-inline-start:auto;font-weight:800;font-size:17px;white-space:nowrap}
+.hempty{padding:40px 20px;text-align:center;color:#8b9096;direction:rtl}
+.sheetbg{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:20;display:flex;align-items:flex-end}
+.sheet{background:var(--card);color:var(--tx);width:100%;max-width:560px;margin:0 auto;border-radius:24px 24px 0 0;padding:20px 16px calc(20px + env(safe-area-inset-bottom));max-height:88vh;overflow:auto}
+.sheet h2{margin-bottom:10px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
 <div id="app"><div class="wrap"><div class="sk" style="height:48px;width:60%"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div>
+<div id="nav" class="nav">
+  <button data-t="home" onclick="tab('home')"><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v9a1 1 0 0 0 1 1h4v-5h4v5h4a1 1 0 0 0 1-1v-9"/></svg><span id="nvh"></span></button>
+  <button data-t="wallet" onclick="tab('wallet')"><svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H18a1 1 0 0 1 1 1v2"/><path d="M3 7.5V17a2 2 0 0 0 2 2h14a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1H5.5A2.5 2.5 0 0 1 3 7.5z"/><circle cx="16.5" cy="13.5" r="1.2"/></svg><span id="nvw"></span></button>
+</div>
 <div id="toast"></div>
 <script>
 let tg = window.Telegram && window.Telegram.WebApp;
@@ -3644,7 +3710,13 @@ const I18N = {
     wait_title:'جارٍ تأكيد الدفع…', wait_msg:'لحظات من فضلك.', failed:'لم تكتمل العملية.',
     back_shop:'العودة للمتجر', net_err:'تعذّر الاتصال، حاول مجدداً.', cancelled:'تم إلغاء الدفع.',
     open_tg:'افتح المتجر من داخل تيليجرام.', order:'رقم الطلب', ship_dz:'🇩🇿 التوصيل داخل الجزائر فقط', retry:'إعادة المحاولة',
-    contact:'بيانات التوصيل', details:'معلومات إضافية', payment:'طريقة الدفع', phys:'منتج مادي', dig:'منتج رقمي'
+    contact:'بيانات التوصيل', details:'معلومات إضافية', payment:'طريقة الدفع', phys:'منتج مادي', dig:'منتج رقمي',
+    nav_home:'الرئيسية', nav_wallet:'المحفظة', w_owner:'المالك', w_active:'نشط', w_dep:'إيداع', w_wd:'سحب', w_his:'السجل',
+    w_conn_t:'اربط محفظتك', w_conn_m:'اربط محفظة TON لعرض رصيدك وإدارة أموالك.', w_conn_b:'💎 ربط المحفظة',
+    w_dep_t:'إيداع', w_dep_m:'أرسل TON أو USDT (على شبكة TON) إلى هذا العنوان:', w_wd_t:'سحب', w_to:'عنوان المستلم',
+    w_amt:'المبلغ (TON)', w_send:'إرسال', w_bad:'تحقق من العنوان والمبلغ.', w_nohis:'لا توجد معاملات بعد.',
+    w_in:'استلام', w_out:'إرسال', w_close:'إغلاق', w_load:'تعذّر تحميل بيانات المحفظة.', w_note:'سيُطلب منك التأكيد داخل محفظتك.',
+    w_copy:'نسخ العنوان'
   },
   en: {
     empty:'No products available right now.', digital:'💾 Digital product — delivered right after payment', stock:'In stock',
@@ -3660,14 +3732,21 @@ const I18N = {
     wait_title:'Confirming payment…', wait_msg:'Just a moment.', failed:'The operation was not completed.',
     back_shop:'Back to shop', net_err:'Connection failed, please try again.', cancelled:'Payment cancelled.',
     open_tg:'Open the shop from inside Telegram.', order:'Order number', ship_dz:'🇩🇿 Delivery inside Algeria only', retry:'Retry',
-    contact:'Delivery details', details:'Extra details', payment:'Payment', phys:'Physical product', dig:'Digital product'
+    contact:'Delivery details', details:'Extra details', payment:'Payment', phys:'Physical product', dig:'Digital product',
+    nav_home:'Home', nav_wallet:'Wallet', w_owner:'Owner', w_active:'Active', w_dep:'Deposit', w_wd:'Withdraw', w_his:'History',
+    w_conn_t:'Connect your wallet', w_conn_m:'Connect a TON wallet to see your balance and manage your funds.', w_conn_b:'💎 Connect wallet',
+    w_dep_t:'Deposit', w_dep_m:'Send TON or USDT (on the TON network) to this address:', w_wd_t:'Withdraw', w_to:'Recipient address',
+    w_amt:'Amount (TON)', w_send:'Send', w_bad:'Check the address and amount.', w_nohis:'No transactions yet.',
+    w_in:'Received', w_out:'Sent', w_close:'Close', w_load:'Could not load wallet data.', w_note:'You will be asked to confirm inside your wallet.',
+    w_copy:'Copy address'
   }
 };
 let L = 'ar', S = null, tcUI = null, stack = ['home'];
-const st = {p:null, form:null, oid:null, ton:null, timer:null};
+const st = {p:null, form:null, oid:null, ton:null, timer:null, w:null};
 const t = k => (I18N[L] && I18N[L][k]) || I18N.ar[k] || k;
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const topView = () => stack[stack.length - 1];
 
 async function api(path, opts) {
   opts = opts || {};
@@ -3702,9 +3781,19 @@ function haptic() { try { tg.HapticFeedback.notificationOccurred('success'); } c
 /* ── التنقل ── */
 function show(name, replace) { if (replace) stack = [name]; else stack.push(name); render(); }
 function back() { if (stack.length > 1) { stack.pop(); render(); } }
+function tab(n) { closeSheet(); if (stack.length === 1 && stack[0] === n) return; show(n, true); }
 function render() {
   clearInterval(st.timer);
-  const v = stack[stack.length - 1];
+  const v = topView();
+  const tabs = v === 'home' || v === 'wallet';
+  const dark = v === 'wallet' || v === 'history';
+  document.body.classList.toggle('hasnav', tabs);
+  document.body.classList.toggle('wd', dark);
+  const nav = document.getElementById('nav');
+  nav.style.display = tabs ? 'flex' : 'none';
+  document.getElementById('nvh').textContent = t('nav_home');
+  document.getElementById('nvw').textContent = t('nav_wallet');
+  nav.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.t === v));
   try { views[v](); }
   catch (e) { app.innerHTML = '<div class="center"><p>' + t('net_err') + '</p><button class="primary" onclick="location.reload()">' + t('retry') + '</button></div>'; }
   try {
@@ -3873,17 +3962,22 @@ function loadTC() {
     loadTC.p.then(res);
   });
 }
+async function initTC() {
+  if (!(await loadTC())) return null;
+  if (!tcUI) {
+    tcUI = new TON_CONNECT_UI.TonConnectUI({
+      manifestUrl: location.origin + '/tonconnect-manifest.json',
+      actionsConfiguration: {twaReturnUrl: 'https://t.me/' + S.bot}
+    });
+    tcUI.onStatusChange(() => { tonLabel(); if (topView() === 'wallet') walletRefresh(); });
+  }
+  return tcUI;
+}
 async function setupTC() {
   try {
-    if (!(await loadTC())) return;
-    if (!tcUI) {
-      tcUI = new TON_CONNECT_UI.TonConnectUI({
-        manifestUrl: location.origin + '/tonconnect-manifest.json',
-        actionsConfiguration: {twaReturnUrl: 'https://t.me/' + S.bot}
-      });
-      tcUI.onStatusChange(() => tonLabel());
-    }
-    tcUI.connectionRestored.then(tonLabel);
+    const ui = await initTC();
+    if (!ui) return;
+    ui.connectionRestored.then(tonLabel);
     tonLabel();
   } catch (e) { tcUI = null; }
 }
@@ -3910,6 +4004,155 @@ async function checkTon() {
 }
 function cp(x) { try { navigator.clipboard.writeText(x).then(() => toast(t('copied'))); } catch (e) {} }
 
+/* ── المحفظة ── */
+const IC = {
+  ton: '<svg class="wic" viewBox="0 0 56 56" width="56" height="56"><circle cx="28" cy="28" r="28" fill="#2f9bf5"/><path d="M16 15h24l9 11-21 22L7 26z" fill="#fff" transform="translate(-3 -1) scale(.95)"/><path d="M28 19l2.5 6.2L36.7 27.7 30.5 30.2 28 36.4 25.5 30.2 19.3 27.7l6.2-2.5z" fill="#2f9bf5"/></svg>',
+  usdt: '<svg class="wic" viewBox="0 0 56 56" width="56" height="56"><circle cx="28" cy="28" r="28" fill="#0f9c97"/><path d="M15 17h26l7 9-20 20L8 26z" fill="#fff" transform="translate(0 -1) scale(.92) translate(2 2)"/><path d="M21.5 23h13v3.2h-4.8V37h-3.4V26.2h-4.8z" fill="#0f9c97"/></svg>',
+  logo: '<svg width="46" height="46" viewBox="0 0 40 40" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><path d="M7 8h26c2 0 3.1 2.1 2 3.8L21.8 33.2a2.1 2.1 0 0 1-3.6 0L5 11.8C3.9 10.100 5 8 7 8z"/><path d="M20 8v24"/></svg>',
+  out: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3"/><path d="M16 8l4 4-4 4"/><path d="M20 12H9"/></svg>',
+  copy: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.85"><rect x="9" y="9" width="11" height="11" rx="3"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>',
+  ud: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.85"><path d="M8 9l4-4 4 4"/><path d="M8 15l4 4 4-4"/></svg>',
+  dep: '<svg viewBox="0 0 24 24"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>',
+  wd: '<svg viewBox="0 0 24 24"><path d="M12 20V9"/><path d="M7 13l5-5 5 5"/><path d="M5 4h14"/></svg>',
+  his: '<svg viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 4.5v4h4"/><path d="M12 7.5V12l3 2"/></svg>'
+};
+const fusd = n => '$' + (Math.abs(n) < 0.005 && n !== 0 ? Number(n).toFixed(4) : Number(n).toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1'));
+const famt = n => { const s = Number(n).toFixed(4).replace(/\.?0+$/, ''); return s === '' ? '0' : s; };
+const chgHtml = c => '<span class="' + (c >= 0 ? 'up' : 'dn') + '">' + (c >= 0 ? '↑' : '↓') + Math.abs(c).toFixed(2) + '%</span>';
+const shortAddr = a => a.length > 10 ? a.slice(0, 4) + ' ···· ···· ' + a.slice(-4) : a;
+
+function openSheet(h) {
+  closeSheet();
+  const d = document.createElement('div');
+  d.className = 'sheetbg'; d.id = 'sheet';
+  d.onclick = e => { if (e.target === d) closeSheet(); };
+  d.innerHTML = '<div class="sheet" dir="' + (L === 'ar' ? 'rtl' : 'ltr') + '">' + h + '</div>';
+  document.body.appendChild(d);
+}
+function closeSheet() { const s = document.getElementById('sheet'); if (s) s.remove(); }
+
+function vWallet() {
+  app.innerHTML = '<div class="w"><div class="wbox"><div class="wcard" style="min-height:300px"><div class="center" style="min-height:260px;padding:0"><div class="spin"></div></div></div></div></div>';
+  walletInit();
+}
+async function walletInit() {
+  const ui = await initTC();
+  if (topView() !== 'wallet') return;
+  if (!ui) { toast(t('net_err')); walletConnectView(); return; }
+  try { await ui.connectionRestored; } catch (e) {}
+  walletRefresh();
+}
+function walletConnectView() {
+  if (topView() !== 'wallet') return;
+  app.innerHTML = '<div class="w"><div class="wbox"><div class="wcard"><div class="wtop">' + IC.logo + '</div>' +
+    '<div class="wcon"><h2>' + t('w_conn_t') + '</h2><p>' + t('w_conn_m') + '</p>' +
+    '<button onclick="connectWallet()">' + t('w_conn_b') + '</button></div></div></div></div>';
+}
+async function connectWallet() {
+  if (!tcUI) { toast(t('net_err')); return; }
+  try { await tcUI.openModal(); } catch (e) {}
+}
+function walletZero(raw) {
+  return {address: raw, total: 0, change_usd: 0, change_pct: 0, tokens: [
+    {sym: 'TON', name: 'Gram (prev. Toncoin)', tag: '', amount: 0, price: 0, change: 0, usd: 0},
+    {sym: 'USDT', name: 'Tether USD', tag: 'TON', amount: 0, price: 1, change: 0, usd: 0}]};
+}
+async function walletRefresh() {
+  if (topView() !== 'wallet') return;
+  if (!tcUI || !tcUI.connected || !tcUI.account) { st.w = null; walletConnectView(); return; }
+  const raw = tcUI.account.address;
+  if (st.w && st.w.raw === raw) walletPaint(st.w);
+  try {
+    const r = await api('/wallet?addr=' + encodeURIComponent(raw));
+    if (!r.ok) throw new Error('x');
+    r.raw = raw; st.w = r;
+    if (topView() === 'wallet') walletPaint(r);
+  } catch (e) {
+    if (!st.w || st.w.raw !== raw) { if (topView() === 'wallet') walletPaint(walletZero(raw)); toast(t('w_load')); }
+  }
+}
+function walletPaint(d) {
+  const u = (tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
+  const nm = [u.first_name, u.last_name].filter(Boolean);
+  const ini = esc((nm.map(x => Array.from(x)[0]).join('') || 'U').toUpperCase().slice(0, 2));
+  const own = u.username ? '@' + u.username : (nm.join(' ') || '—');
+  const pos = d.change_pct >= 0;
+  const rows = d.tokens.map(k =>
+    '<div class="wrow">' + (IC[k.sym.toLowerCase()] || '') +
+    '<div><div class="wn">' + esc(k.name) + (k.tag ? '<i>' + esc(k.tag) + '</i>' : '') + '</div>' +
+    '<div class="wp">' + fusd(k.price) + ' ' + chgHtml(k.change) + '</div></div>' +
+    '<div class="wr"><b>' + famt(k.amount) + '</b><span>≈ ' + fusd(k.usd) + '</span></div></div>').join('');
+  app.innerHTML = '<div class="w"><div class="wbox">' +
+    '<div class="wcard">' +
+      '<div class="wtop">' + IC.logo + '<button class="wout" onclick="walletLogout()">' + IC.out + '</button></div>' +
+      '<div class="wbal"><b>' + fusd(d.total) + '</b>' + IC.ud +
+        '<span class="wchg' + (pos ? '' : ' dn') + '">' + (pos ? '↑' : '↓') + Math.abs(d.change_pct).toFixed(2) + '% · ' + fusd(Math.abs(d.change_usd)) + '</span></div>' +
+      '<div class="waddr" onclick="cp(\'' + esc(d.address) + '\')"><span>' + esc(shortAddr(d.address)) + '</span>' + IC.copy + '</div>' +
+      '<div class="wown"><div class="wav">' + ini + '</div><div style="min-width:0"><small>' + t('w_owner') + '</small><div class="u">' + esc(own) + '</div></div>' +
+        '<span class="wact">' + t('w_active') + '</span></div>' +
+    '</div>' + rows +
+    '<div class="wbtns">' +
+      '<button class="wdep" onclick="openDeposit()">' + IC.dep + '<span>' + t('w_dep') + '</span></button>' +
+      '<button class="wwd" onclick="openWithdraw()">' + IC.wd + '<span>' + t('w_wd') + '</span></button>' +
+      '<button class="whis" onclick="show(\'history\')">' + IC.his + '<span>' + t('w_his') + '</span></button>' +
+    '</div></div></div>';
+}
+async function walletLogout() {
+  try { if (tcUI) await tcUI.disconnect(); } catch (e) {}
+  st.w = null; walletRefresh();
+}
+function openDeposit() {
+  const a = (st.w && st.w.address) || '';
+  openSheet('<h2>' + t('w_dep_t') + '</h2><p class="hint">' + t('w_dep_m') + '</p>' +
+    '<div class="kv" style="margin-top:12px" onclick="cp(\'' + esc(a) + '\')">' + esc(a) + '</div>' +
+    '<button class="primary" onclick="cp(\'' + esc(a) + '\')">' + t('w_copy') + '</button>' +
+    '<button class="secondary" onclick="closeSheet()">' + t('w_close') + '</button>');
+}
+function openWithdraw() {
+  openSheet('<h2>' + t('w_wd_t') + '</h2><p class="hint">' + t('w_note') + '</p>' +
+    '<label>' + t('w_to') + '</label><input id="wdTo" dir="ltr" placeholder="UQ…" autocomplete="off">' +
+    '<label>' + t('w_amt') + '</label><input id="wdAmt" dir="ltr" inputmode="decimal" placeholder="0.0">' +
+    '<button class="primary" onclick="sendWd()">' + t('w_send') + '</button>' +
+    '<button class="secondary" onclick="closeSheet()">' + t('w_close') + '</button>');
+}
+async function sendWd() {
+  const to = document.getElementById('wdTo').value.trim();
+  const amt = parseFloat(document.getElementById('wdAmt').value.replace(',', '.'));
+  if (!/^[A-Za-z0-9_-]{48}$/.test(to) || !(amt > 0)) { toast(t('w_bad')); return; }
+  if (!tcUI || !tcUI.connected) { closeSheet(); walletRefresh(); return; }
+  try {
+    await tcUI.sendTransaction({
+      validUntil: Math.floor(Date.now() / 1000) + 600,
+      messages: [{address: to, amount: String(Math.round(amt * 1e9))}]
+    });
+    closeSheet(); toast('✅');
+    setTimeout(() => { if (topView() === 'wallet') walletRefresh(); }, 7000);
+  } catch (e) {}
+}
+function vHistory() {
+  app.innerHTML = '<div class="w"><h2>' + t('w_his') + '</h2><div class="wbox" id="hbox"><div class="center" style="min-height:200px;padding:0"><div class="spin"></div></div></div></div>';
+  loadHistory();
+}
+async function loadHistory() {
+  const box = () => document.getElementById('hbox');
+  try {
+    const raw = tcUI && tcUI.account && tcUI.account.address;
+    if (!raw) throw new Error('no wallet');
+    const r = await api('/wallet/history?addr=' + encodeURIComponent(raw));
+    if (topView() !== 'history' || !box()) return;
+    if (!r.ok || !r.items.length) { box().innerHTML = '<div class="hempty">' + t('w_nohis') + '</div>'; return; }
+    box().innerHTML = r.items.map(x => {
+      const inc = x.dir === 'in';
+      const when = x.time ? new Date(x.time * 1000).toLocaleString() : '';
+      return '<div class="hrow"><div class="hic ' + x.dir + '">' + (inc ? '↓' : '↑') + '</div>' +
+        '<div class="hmid"><b>' + (inc ? t('w_in') : t('w_out')) + '</b><span>' + esc(shortAddr(x.peer || '—')) + ' · ' + esc(when) + '</span></div>' +
+        '<div class="hamt ' + (inc ? 'up' : 'dn') + '">' + (inc ? '+' : '−') + famt(x.amount) + ' TON</div></div>';
+    }).join('');
+  } catch (e) {
+    if (topView() === 'history' && box()) box().innerHTML = '<div class="hempty">' + t('w_load') + '</div>';
+  }
+}
+
 function vWait() {
   app.innerHTML = '<div class="center"><div class="spin"></div><h2>' + t('wait_title') + '</h2><p class="hint">' + t('wait_msg') + '</p></div>';
 }
@@ -3921,7 +4164,7 @@ function vFailed() {
   app.innerHTML = '<div class="center"><div class="big">❌</div><h2>' + t('failed') + '</h2>' +
     '<button class="primary" onclick="reload()">' + t('back_shop') + '</button></div>';
 }
-const views = {home: vHome, product: vProduct, checkout: vCheckout, ton: vTon, wait: vWait, done: vDone, failed: vFailed};
+const views = {home: vHome, product: vProduct, checkout: vCheckout, ton: vTon, wallet: vWallet, history: vHistory, wait: vWait, done: vDone, failed: vFailed};
 
 async function load() {
   const r = await apiRetry('/home', null, 3);
@@ -3955,7 +4198,6 @@ function applyLang() {
 </body>
 </html>
 """
-
 
 def admin_commands(lang, is_main):
     cmds = [
