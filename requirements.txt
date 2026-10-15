@@ -2,3 +2,4 @@ python-telegram-bot>=21
 psycopg2-binary
 httpx
 aiohttp
+Pillow
