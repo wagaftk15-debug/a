@@ -6,6 +6,7 @@ import json
 import hmac
 import base64
 import hashlib
+import binascii
 from types import SimpleNamespace
 from urllib.parse import parse_qsl
 import time
@@ -3052,7 +3053,7 @@ async def load_shops():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 12) الموقع: Telegram Mini App — منتجات فقط، بدون صور ولا فيديو
+# 12) الموقع: Telegram Mini App — منتجات + محفظة، بدون صور ولا فيديو
 # ═════════════════════════════════════════════════════════════════════════════
 MAIN_APP = None
 WEB_RUNNER = None
@@ -3431,6 +3432,142 @@ async def web_check(request):
     return jresp({"status": o["status"], "oid": oid})
 
 
+# ── محفظة الزبون (عرض الرصيد والسجل لمحفظته المربوطة عبر TON Connect) ──
+USDT_MASTER = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
+RAW_ADDR_RE = re.compile(r"^-?\d+:[0-9a-fA-F]{64}$")
+FRIENDLY_RE = re.compile(r"^[A-Za-z0-9_-]{48}$")
+WALLET_TOKENS = {
+    "TON": {"name": "Gram (prev. Toncoin)", "tag": ""},
+    "USDT": {"name": "Tether USD", "tag": "TON"},
+}
+_PRICES = {"ts": 0.0, "d": {}}
+_WCACHE = {}
+
+
+def to_friendly(addr, bounceable=False):
+    """يحوّل العنوان (raw أو friendly) إلى صيغة friendly: UQ.. (غير قابل للارتداد) افتراضياً."""
+    addr = (addr or "").strip()
+    try:
+        if RAW_ADDR_RE.match(addr):
+            wc, h = addr.split(":")
+            wc, hb = int(wc), bytes.fromhex(h)
+        elif FRIENDLY_RE.match(addr):
+            raw = base64.urlsafe_b64decode(addr)
+            if len(raw) != 36:
+                return None
+            wc = raw[1] if raw[1] < 128 else raw[1] - 256
+            hb = raw[2:34]
+        else:
+            return None
+    except Exception:
+        return None
+    data = bytes([0x11 if bounceable else 0x51, wc & 0xFF]) + hb
+    data += binascii.crc_hqx(data, 0).to_bytes(2, "big")
+    return base64.urlsafe_b64encode(data).decode()
+
+
+async def toncenter_get(path, params):
+    hdr = {"X-API-Key": TONCENTER_KEY} if TONCENTER_KEY else {}
+    for i in range(2):
+        r = await ton_http().get("https://toncenter.com" + path, params=params, headers=hdr)
+        if r.status_code == 429 and i == 0:
+            await asyncio.sleep(1.3)
+            continue
+        return r.json()
+    return {}
+
+
+async def get_prices():
+    now = time.time()
+    if _PRICES["d"] and now - _PRICES["ts"] < 60:
+        return _PRICES["d"]
+    try:
+        r = await ton_http().get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "the-open-network,tether", "vs_currencies": "usd", "include_24hr_change": "true"},
+        )
+        j = r.json()
+        t, u = j["the-open-network"], j["tether"]
+        _PRICES["d"] = {
+            "TON": {"price": float(t["usd"]), "change": float(t.get("usd_24h_change") or 0)},
+            "USDT": {"price": float(u["usd"]), "change": float(u.get("usd_24h_change") or 0)},
+        }
+        _PRICES["ts"] = now
+    except Exception as e:
+        log.warning("prices fetch failed: %s", str(e)[:120])
+        _PRICES["ts"] = now - 45          # أعد المحاولة بعد ~15 ثانية
+    return _PRICES["d"] or {"TON": {"price": 0.0, "change": 0.0}, "USDT": {"price": 1.0, "change": 0.0}}
+
+
+async def wallet_snapshot(addr):
+    hit = _WCACHE.get(addr)
+    if hit and time.time() - hit[0] < 15:
+        return hit[1]
+    ton_bal, usdt_bal = 0.0, 0.0
+    try:
+        j = await toncenter_get("/api/v2/getAddressBalance", {"address": addr})
+        if j.get("ok"):
+            ton_bal = int(j.get("result") or 0) / 1e9
+    except Exception as e:
+        log.warning("wallet ton balance failed: %s", str(e)[:120])
+    try:
+        j = await toncenter_get("/api/v3/jetton/wallets", {
+            "owner_address": addr, "jetton_address": USDT_MASTER, "limit": 1, "offset": 0})
+        ws = j.get("jetton_wallets") or []
+        if ws:
+            usdt_bal = int(ws[0].get("balance") or 0) / 1e6
+    except Exception as e:
+        log.warning("wallet usdt balance failed: %s", str(e)[:120])
+    pr = await get_prices()
+
+    tokens, total, chg_usd = [], 0.0, 0.0
+    for sym, amount in (("TON", ton_bal), ("USDT", usdt_bal)):
+        price = pr.get(sym, {}).get("price", 0.0)
+        change = pr.get(sym, {}).get("change", 0.0)
+        usd = amount * price
+        total += usd
+        chg_usd += usd - usd / (1 + change / 100) if change > -99 else 0.0
+        tokens.append({"sym": sym, "name": WALLET_TOKENS[sym]["name"], "tag": WALLET_TOKENS[sym]["tag"],
+                       "amount": amount, "price": price, "change": change, "usd": usd})
+    base = total - chg_usd
+    data = {"address": addr, "tokens": tokens, "total": total, "change_usd": chg_usd,
+            "change_pct": (chg_usd / base * 100) if base > 0 else 0.0}
+    _WCACHE[addr] = (time.time(), data)
+    return data
+
+
+async def web_wallet(request):
+    app, shop, user = await web_auth(request)
+    addr = to_friendly(request.query.get("addr", ""))
+    if not addr:
+        return _err("bad_request", "bad address")
+    data = await wallet_snapshot(addr)
+    return jresp({"ok": True, **data})
+
+
+async def web_wallet_history(request):
+    app, shop, user = await web_auth(request)
+    addr = to_friendly(request.query.get("addr", ""))
+    if not addr:
+        return _err("bad_request", "bad address")
+    items = []
+    try:
+        j = await toncenter_get("/api/v2/getTransactions", {"address": addr, "limit": 25})
+        for tx in (j.get("result") or []) if j.get("ok") else []:
+            inm = tx.get("in_msg") or {}
+            outs = tx.get("out_msgs") or []
+            if inm.get("source"):
+                items.append({"dir": "in", "amount": int(inm.get("value") or 0) / 1e9,
+                              "peer": inm["source"], "time": tx.get("utime")})
+            elif outs:
+                amt = sum(int(o.get("value") or 0) for o in outs)
+                items.append({"dir": "out", "amount": amt / 1e9,
+                              "peer": outs[0].get("destination") or "", "time": tx.get("utime")})
+    except Exception as e:
+        log.warning("wallet history failed: %s", str(e)[:120])
+    return jresp({"ok": True, "items": items})
+
+
 async def web_manifest(request):
     return web.json_response(
         {"url": WEBAPP_URL, "name": "Shop", "iconUrl": f"{WEBAPP_URL}/logo.png"},
@@ -3452,6 +3589,8 @@ def web_app_factory():
         web.get(r"/app/{sid:\d+}", web_page),
         web.get(r"/api/{sid:\d+}/home", web_home),
         web.get(r"/api/{sid:\d+}/phone", web_phone),
+        web.get(r"/api/{sid:\d+}/wallet", web_wallet),
+        web.get(r"/api/{sid:\d+}/wallet/history", web_wallet_history),
         web.post(r"/api/{sid:\d+}/order", web_order),
         web.get(r"/api/{sid:\d+}/order/{oid:\d+}", web_status),
         web.post(r"/api/{sid:\d+}/order/{oid:\d+}/check", web_check),
@@ -3546,7 +3685,6 @@ async def cmd_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resize_keyboard=True, one_time_keyboard=True,
     )
     await update.message.reply_text(T("phone_ask"), reply_markup=kb)
-
 WEB_HTML = r"""<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
