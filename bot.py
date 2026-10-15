@@ -17,7 +17,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 import httpx
-from aiohttp import web
+try:
+    from PIL import Image
+except ImportError:          # بدون Pillow تُخدم الصور بحجمها الأصلي
+    Image = None
+try:
+    from aiohttp import web
+except ImportError:          # البوت يعمل بدون الموقع إذا لم تُثبَّت aiohttp
+    web = None
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -61,6 +68,13 @@ MAX_EXTRAS = 10       # أقصى عدد حقول للمنتج الواحد
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")   # الرابط العام للموقع: https://your-domain
 PORT = int(os.environ.get("PORT", "8080") or 8080)
 MEDIA_DIR = os.environ.get("MEDIA_DIR", "/tmp/shop_media")  # تخزين مؤقت لصور/فيديوهات المنتجات
+# تطبيع الرابط: يضيف https:// إن نُسي، ويستعمل دومين Railway العام تلقائياً إن لم يُحدَّد WEBAPP_URL
+_raw = (WEBAPP_URL or os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")).strip().rstrip("/")
+if _raw.startswith("http://"):
+    _raw = "https://" + _raw[len("http://"):]
+elif _raw and not _raw.startswith("https://"):
+    _raw = "https://" + _raw
+WEBAPP_URL = _raw
 LOGO_PATH = os.environ.get("LOGO_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "shop_logo.png"))
 
 # اللغة الافتراضية: ar أو en
@@ -1422,8 +1436,11 @@ async def send_home(message, uid):
         await message.reply_text(msg)
         return
     if WEBAPP_URL:
-        await message.reply_text(T("open_shop_msg"), reply_markup=webapp_keyboard())
-        return
+        try:
+            await message.reply_text(T("open_shop_msg"), reply_markup=webapp_keyboard())
+            return
+        except Exception as e:
+            log.error("webapp button failed (%s) -> classic list", e)
     if len(prods) == 1:
         await show_product(message, prods[0], uid)
     else:
@@ -3094,6 +3111,52 @@ def product_json(p, uid, sid):
     }
 
 
+def load_home_data(uid, sid):
+    """يبني قائمة المنتجات بعدد ثابت من الاستعلامات (بدل استعلامات متعددة لكل منتج)."""
+    prods = list_products()
+    has_wallet = bool(get_wallet())
+    media, extras, held = {}, {}, {}
+    with cursor() as cur:
+        cur.execute("SELECT ph.product_id, ph.file_id, ph.kind FROM shop_photos ph "
+                    "JOIN shop_products p ON p.id=ph.product_id WHERE p.shop_id=? ORDER BY ph.id", (sid,))
+        for r in cur.fetchall():
+            media.setdefault(r["product_id"], []).append(r)
+        cur.execute("SELECT l.product_id, f.id, f.label, f.kind, f.flen, f.prefix, f.suffix "
+                    "FROM shop_product_fields l JOIN shop_fields f ON f.id=l.field_id "
+                    "WHERE f.shop_id=? ORDER BY l.id", (sid,))
+        for r in cur.fetchall():
+            extras.setdefault(r["product_id"], []).append(r)
+        cur.execute("SELECT product_id, COUNT(*) AS n FROM shop_orders WHERE shop_id=? AND status='pending' "
+                    "AND reserved_until > ? AND user_id <> ? GROUP BY product_id", (sid, int(time.time()), uid))
+        for r in cur.fetchall():
+            held[r["product_id"]] = r["n"]
+    out = []
+    for p in prods:
+        methods = []
+        if stars_on(p) and (p.get("price") or 0) > 0:
+            methods.append("stars")
+        if p.get("price_ton") and has_wallet:
+            methods.append("ton")
+        if p["stock"] == 0:
+            state = "sold"
+        elif p["stock"] < 0 or p["stock"] - held.get(p["id"], 0) > 0:
+            state = "available"
+        else:
+            state = "held"
+        out.append({
+            "id": p["id"], "name": p["name"], "description": p["description"] or "",
+            "shipping": bool(p["shipping"]), "stock": p["stock"], "methods": methods,
+            "price": p["price"] if "stars" in methods else None,
+            "price_ton": fmt_ton(p["price_ton"]) if "ton" in methods else None,
+            "state": state,
+            "media": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"] or "photo"}
+                      for m in media.get(p["id"], [])[:MAX_PHOTOS]],
+            "extras": [{"id": f["id"], "label": f["label"], "kind": f.get("kind") or "text",
+                        "rules": [plain(r) for r in extra_rules(f)]} for f in extras.get(p["id"], [])],
+        })
+    return out
+
+
 async def web_auth(request):
     """يتحقق من المستخدم ويضبط سياق المتجر/اللغة لهذا الطلب."""
     sid = int(request.match_info["sid"])
@@ -3120,21 +3183,30 @@ async def web_health(request):
 async def web_page(request):
     if not shop_app(int(request.match_info["sid"])):
         raise web.HTTPNotFound()
-    return web.Response(text=WEB_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
+    resp = web.Response(text=WEB_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
+    resp.enable_compression()
+    return resp
 
 
 async def web_home(request):
     app, shop, user = await web_auth(request)
     sid = shop["id"]
-    return web.json_response({
-        "lang": _lang.get(),
-        "title": app.bot.first_name or "Shop",
-        "bot": app.bot.username,
-        "banner": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"]} for m in get_list_media()[:MAX_PHOTOS]],
-        "products": [product_json(p, user.id, sid) for p in list_products()],
-        "phone": get_phone(user.id),
-        "wilayas": wilaya_names(),
-    })
+
+    def build():
+        return {
+            "lang": _lang.get(),
+            "title": app.bot.first_name or "Shop",
+            "bot": app.bot.username,
+            "banner": [{"url": media_url(sid, m["file_id"]), "kind": m["kind"]} for m in get_list_media()[:MAX_PHOTOS]],
+            "products": load_home_data(user.id, sid),
+            "phone": get_phone(user.id),
+            "wilayas": wilaya_names(),
+        }
+
+    data = await asyncio.to_thread(build)      # لا نحجب حلقة الأحداث أثناء استعلامات قاعدة البيانات
+    resp = web.json_response(data)
+    resp.enable_compression()
+    return resp
 
 
 async def web_phone(request):
@@ -3248,6 +3320,13 @@ async def web_check(request):
     return web.json_response({"status": o["status"], "oid": oid})
 
 
+def _make_thumb(src, dst, w):
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        im.thumbnail((w, w))
+        im.save(dst, "JPEG", quality=78, optimize=True)
+
+
 async def web_media(request):
     """يخدم صور/فيديوهات المنتجات من تيليجرام (file_id) مع تخزين مؤقت على القرص."""
     sid = int(request.match_info["sid"])
@@ -3277,7 +3356,24 @@ async def web_media(request):
                 except Exception as e:
                     log.warning("media proxy failed: %s", e)
                     raise web.HTTPNotFound()
-    return web.FileResponse(found[0], headers={"Cache-Control": "public, max-age=86400"})
+    path = found[0]
+    try:
+        w = int(request.query.get("w", 0))
+    except ValueError:
+        w = 0
+    if Image and w and os.path.splitext(path)[1].lower() in (".jpg", ".jpeg", ".png", ".webp"):
+        w = max(160, min(w, 1280))
+        dst = f"{base}_w{w}.jpg"
+        if not os.path.exists(dst):
+            tmp = f"{dst}.{time.time_ns()}.tmp"
+            try:
+                await asyncio.to_thread(_make_thumb, path, tmp, w)
+                os.replace(tmp, dst)
+            except Exception as e:
+                log.warning("thumb failed: %s", e)
+                dst = path
+        path = dst
+    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=604800"})
 
 
 async def web_manifest(request):
@@ -3311,18 +3407,27 @@ def web_app_factory():
 
 
 async def start_web():
-    global WEB_RUNNER, MEDIA_LOCK
+    global WEB_RUNNER, MEDIA_LOCK, WEBAPP_URL
     if not WEBAPP_URL:
         log.info("WEBAPP_URL not set: Mini App disabled (classic bot flow only)")
         return
-    MEDIA_LOCK = asyncio.Lock()
-    os.makedirs(MEDIA_DIR, exist_ok=True)
-    WEB_RUNNER = web.AppRunner(web_app_factory())
-    await WEB_RUNNER.setup()
-    await web.TCPSite(WEB_RUNNER, "0.0.0.0", PORT).start()
-    log.info("Mini App listening on :%s (%s)", PORT, WEBAPP_URL)
-    if not os.path.exists(LOGO_PATH):
-        log.warning("Logo not found at %s (TON Connect icon). Put shop_logo.png next to bot.py", LOGO_PATH)
+    if web is None:
+        log.error("aiohttp is not installed -> Mini App disabled. Run: pip install aiohttp")
+        WEBAPP_URL = ""
+        return
+    try:
+        MEDIA_LOCK = asyncio.Lock()
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        runner = web.AppRunner(web_app_factory())
+        await runner.setup()
+        await web.TCPSite(runner, "0.0.0.0", PORT).start()
+        WEB_RUNNER = runner
+        log.info("Mini App listening on :%s (%s)", PORT, WEBAPP_URL)
+        if not os.path.exists(LOGO_PATH):
+            log.warning("Logo not found at %s (TON Connect icon). Put shop_logo.png next to bot.py", LOGO_PATH)
+    except Exception as e:
+        log.error("Mini App failed to start (%s) -> falling back to the classic bot flow", e)
+        WEBAPP_URL = ""
 
 
 async def stop_web():
@@ -3362,7 +3467,6 @@ WEB_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Shop</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js"></script>
 <style>
 :root{--bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#17181a);--hint:var(--tg-theme-hint-color,#7d838c);--btn:var(--tg-theme-button-color,#2a8cff);--btx:var(--tg-theme-button-text-color,#fff);--card:var(--tg-theme-secondary-bg-color,#f1f3f7);--line:rgba(127,127,127,.22)}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -3483,10 +3587,10 @@ function render() {
 async function reload() { try { await load(); } catch (e) {} stack = ['home']; render(); }
 
 /* ── عناصر مشتركة ── */
-function media(m, attrs) {
+function media(m, attrs, w) {
   return m.kind === 'video'
-    ? '<video src="' + m.url + '" ' + (attrs || 'controls') + ' playsinline preload="metadata"></video>'
-    : '<img src="' + m.url + '" loading="lazy" alt="">';
+    ? '<video src="' + m.url + '" ' + (attrs || 'controls') + ' playsinline preload="none" style="background:#000"></video>'
+    : '<img src="' + m.url + (w ? '?w=' + w : '') + '" loading="lazy" decoding="async" alt="">';
 }
 function chips(p) {
   let h = '';
@@ -3498,10 +3602,11 @@ function chips(p) {
 /* ── الصفحات ── */
 function vHome() {
   const ban = S.banner.length
-    ? '<div class="scroller">' + S.banner.map(m => '<div class="slide">' + media(m) + '</div>').join('') + '</div>' : '';
+    ? '<div class="scroller">' + S.banner.map(m => '<div class="slide">' + media(m, '', 900) + '</div>').join('') + '</div>' : '';
   const cards = S.products.map(p => {
-    const m = p.media[0];
-    const th = m ? media(m, 'muted') + (m.kind === 'video' ? '<span class="play">▶</span>' : '') : (p.shipping ? '🛍' : '💾');
+    const m = p.media.find(x => x.kind !== 'video');
+    const th = m ? media(m, '', 420) + (p.media[0].kind === 'video' ? '<span class="play">▶</span>' : '')
+      : (p.media.length ? '🎬' : (p.shipping ? '🛍' : '💾'));
     const bad = p.state !== 'available' ? '<span class="badge">' + t('sold') + '</span>' : '';
     return '<div class="card" onclick="openProduct(' + p.id + ')">' + bad + '<div class="thumb">' + th + '</div>' +
       '<div class="info"><div class="name">' + esc(p.name) + '</div>' + chips(p) + '</div></div>';
@@ -3515,7 +3620,7 @@ function openProduct(id) { st.p = S.products.find(x => x.id === id); show('produ
 function vProduct() {
   const p = st.p;
   const gal = p.media.length
-    ? '<div class="scroller">' + p.media.map(m => '<div class="slide" style="aspect-ratio:1/1">' + media(m) + '</div>').join('') + '</div>' : '';
+    ? '<div class="scroller">' + p.media.map(m => '<div class="slide" style="aspect-ratio:1/1">' + media(m, '', 900) + '</div>').join('') + '</div>' : '';
   const ok = p.state === 'available' && p.methods.length;
   const note = p.state === 'sold' ? t('sold') : (p.state === 'held' ? t('held') : t('unavailable'));
   const line = p.shipping ? ((p.stock >= 0 ? t('stock') + ': ' + p.stock + ' · ' : '') + t('ship_dz')) : t('digital');
@@ -3548,6 +3653,7 @@ async function pollPhone(n) {
 
 function vCheckout() {
   const p = st.p, f = st.form;
+  if (p.methods.indexOf('ton') >= 0) loadTC();   // تحميل مسبق صامت لمكتبة TON Connect
   let h = '<div class="wrap"><h2>' + esc(p.name) + '</h2>' + chips(p);
   if (p.shipping) {
     h += '<div id="phoneBox" style="margin-top:12px">' + phoneHtml() + '</div>';
@@ -3624,8 +3730,21 @@ function vTon() {
     '<button class="secondary" onclick="checkTon()">' + t('check') + '</button></div>';
   setupTC();
 }
-function setupTC() {
-  if (!window.TON_CONNECT_UI) return;
+function loadTC() {
+  return new Promise(res => {
+    if (window.TON_CONNECT_UI) return res(true);
+    if (loadTC.p) return loadTC.p.then(res);
+    loadTC.p = new Promise(r2 => {
+      const sc = document.createElement('script');
+      sc.src = 'https://cdn.jsdelivr.net/npm/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js';
+      sc.onload = () => r2(true); sc.onerror = () => { loadTC.p = null; r2(false); };
+      document.head.appendChild(sc);
+    });
+    loadTC.p.then(res);
+  });
+}
+async function setupTC() {
+  if (!(await loadTC())) return;
   if (!tcUI) {
     tcUI = new TON_CONNECT_UI.TonConnectUI({
       manifestUrl: location.origin + '/tonconnect-manifest.json',
@@ -3774,6 +3893,8 @@ async def post_init(app: Application):
             msg += T("su_warn", L)
     if RUNNING:
         msg += T("su_subs", L, n=len(RUNNING))
+    if WEBAPP_URL:
+        msg += f"\n🌐 Mini App: {webapp_url(0)}"
     msg += T("su_help", L)
     try:
         await app.bot.send_message(ADMIN_ID, msg)
