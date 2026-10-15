@@ -3256,12 +3256,21 @@ async def web_health(request):
     return web.Response(text="ok")
 
 
+_PAGE_GZ = None
+
+
 async def web_page(request):
+    global _PAGE_GZ
     if not shop_app(int(request.match_info["sid"])):
         raise web.HTTPNotFound()
-    resp = web.Response(text=WEB_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
-    resp.enable_compression()
-    return resp
+    if "gzip" in request.headers.get("Accept-Encoding", ""):
+        if _PAGE_GZ is None:
+            import gzip
+            _PAGE_GZ = gzip.compress(WEB_HTML.encode("utf-8"), 9)
+        return web.Response(body=_PAGE_GZ, headers={
+            "Content-Type": "text/html; charset=utf-8", "Content-Encoding": "gzip",
+            "Vary": "Accept-Encoding", "Cache-Control": "no-cache"})
+    return web.Response(text=WEB_HTML, content_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
 async def fetch_tg_js():
@@ -3618,7 +3627,7 @@ WEB_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Shop</title>
-<script src="/tg.js"></script>
+<script src="/tg.js" onerror="var s=document.createElement('script');s.src='https://telegram.org/js/telegram-web-app.js';document.head.appendChild(s)"></script>
 <style>
 :root{--bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#17181a);--hint:var(--tg-theme-hint-color,#7d838c);--btn:var(--tg-theme-button-color,#2a8cff);--btx:var(--tg-theme-button-text-color,#fff);--card:var(--tg-theme-secondary-bg-color,#f1f3f7);--line:rgba(127,127,127,.22)}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -3655,6 +3664,9 @@ input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--c
 .kv{background:var(--card);border-radius:12px;padding:10px 12px;margin-top:6px;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:13px;direction:ltr;text-align:left}
 .center{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:70vh;padding:20px}
 .big{font-size:56px}
+.sk{background:linear-gradient(90deg,var(--card) 25%,rgba(127,127,127,.18) 50%,var(--card) 75%);background-size:200% 100%;animation:sh 1.2s infinite;border-radius:18px;aspect-ratio:1/1.25}
+@keyframes sh{to{background-position:-200% 0}}
+.search{margin:0 0 12px}
 .spin{width:36px;height:36px;border:4px solid var(--line);border-top-color:var(--btn);border-radius:50%;animation:s 1s linear infinite;margin-bottom:12px}
 @keyframes s{to{transform:rotate(360deg)}}
 #toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);background:rgba(20,20,20,.92);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90%;text-align:center;z-index:10}
@@ -3662,10 +3674,10 @@ input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--c
 </style>
 </head>
 <body>
-<div id="app"><div class="center"><div class="spin"></div></div></div>
+<div id="app"><div class="wrap"><div class="sk" style="aspect-ratio:16/8;margin-bottom:12px"></div><div class="grid"><div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div></div>
 <div id="toast"></div>
 <script>
-const tg = window.Telegram && window.Telegram.WebApp;
+let tg = window.Telegram && window.Telegram.WebApp;
 const SID = location.pathname.split('/').pop();
 const app = document.getElementById('app');
 
@@ -3706,7 +3718,7 @@ const st = {p:null, form:null, oid:null, ton:null, timer:null};
 const t = k => (I18N[L] && I18N[L][k]) || I18N.ar[k] || k;
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-if (tg) { tg.ready(); tg.expand(); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function api(path, opts) {
   opts = opts || {};
@@ -3766,13 +3778,18 @@ function vHome() {
     const th = m ? media(m, '', 420) + (p.media[0].kind === 'video' ? '<span class="play">▶</span>' : '')
       : (p.media.length ? '🎬' : (p.shipping ? '🛍' : '💾'));
     const bad = p.state !== 'available' ? '<span class="badge">' + t('sold') + '</span>' : '';
-    return '<div class="card" onclick="openProduct(' + p.id + ')">' + bad + '<div class="thumb">' + th + '</div>' +
+    return '<div class="card" data-n="' + esc(p.name.toLowerCase()) + '" onclick="openProduct(' + p.id + ')">' + bad + '<div class="thumb">' + th + '</div>' +
       '<div class="info"><div class="name">' + esc(p.name) + '</div>' + chips(p) + '</div></div>';
   }).join('');
-  app.innerHTML = '<div class="wrap"><h1>' + esc(S.title) + '</h1>' + ban +
-    (cards ? '<div class="grid">' + cards + '</div>' : '<p class="hint">' + t('empty') + '</p>') + '</div>';
+  const sb = S.products.length >= 6 ? '<input class="search" type="search" placeholder="🔍" oninput="filt(this.value)">' : '';
+  app.innerHTML = '<div class="wrap"><h1>' + esc(S.title) + '</h1>' + ban + sb +
+    (cards ? '<div class="grid" id="grid">' + cards + '</div>' : '<p class="hint">' + t('empty') + '</p>') + '</div>';
 }
 
+function filt(q) {
+  q = q.trim().toLowerCase();
+  document.querySelectorAll('#grid .card').forEach(c => { c.style.display = !q || c.dataset.n.indexOf(q) >= 0 ? '' : 'none'; });
+}
 function openProduct(id) { st.p = S.products.find(x => x.id === id); show('product'); }
 
 function vProduct() {
@@ -3952,21 +3969,35 @@ const views = {home: vHome, product: vProduct, checkout: vCheckout, ton: vTon, w
 async function load() {
   try { S = await api('/home'); }
   catch (e) { S = await api('/home'); }          // إعادة محاولة واحدة تلقائياً
+  applyLang();
+  try { localStorage.setItem('home_' + SID, JSON.stringify(S)); } catch (e) {}
+}
+function applyLang() {
   L = S.lang;
   document.documentElement.lang = L;
   document.documentElement.dir = L === 'ar' ? 'rtl' : 'ltr';
 }
 (async () => {
+  for (let i = 0; i < 40 && !(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData); i++) await sleep(150);
+  tg = window.Telegram && window.Telegram.WebApp;
   if (!tg || !tg.initData) {
     app.innerHTML = '<div class="center"><p>' + I18N.ar.open_tg + '<br>' + I18N.en.open_tg + '</p></div>';
     return;
   }
+  tg.ready(); tg.expand();
   try { if (tg.BackButton) tg.BackButton.onClick(back); } catch (e) {}
-  try { await load(); render(); }
-  catch (e) {
-    app.innerHTML = '<div class="center"><p>' + t('net_err') + '<br><small dir="ltr">' + esc(e.message) +
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem('home_' + SID) || 'null'); } catch (e) {}
+  if (cached && cached.products) { S = cached; applyLang(); render(); }
+  const slow = setTimeout(() => { if (!S) toast('⏳ ' + t('wait_msg')); }, 6000);
+  try {
+    await load();
+    if (stack.length === 1 && stack[0] === 'home') render();
+  } catch (e) {
+    if (!S) app.innerHTML = '<div class="center"><p>' + t('net_err') + '<br><small dir="ltr">' + esc(e.message) +
       '</small></p><button class="primary" onclick="location.reload()">↻</button></div>';
   }
+  clearTimeout(slow);
 })();
 </script>
 </body>
